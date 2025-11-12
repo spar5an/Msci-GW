@@ -1,5 +1,5 @@
 # Msci-GW
-Code/notes base for Msci project on gravitational waves and machine learning at Imperial College London
+Code/notes base for Msci project on gravitational waves and machine learning at Imperial College London. This is designed to run inside the pycbc-el8 docker.
 
 At this point in time, just messing around with feature extraction from time series data.
 
@@ -12,6 +12,9 @@ TODO:
 - Parameter Search for best model --> Done
 
 - Update Model to do parameter prosterior prediction, look at dingo
+
+OK the way this has been done by dingo and most neural posterior estimations, is using a tool called normalising flows. I have spent like 7 hours trying to understand them and im still not there yet. I have included a simple example written by claude before I start work on my own stuff
+
 - Update to pycbc noise
 - Update to pycbc data
 - Data pre-processing
