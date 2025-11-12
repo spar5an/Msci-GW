@@ -15,6 +15,15 @@ TODO:
 
 OK the way this has been done by dingo and most neural posterior estimations, is using a tool called normalising flows. I have spent like 7 hours trying to understand them and im still not there yet. I have included a simple example written by claude before I start work on my own stuff
 
+TODO FOR NORMALISING FLOWS
+- Data structure: Check how to read in the data correctly
+- Transforms required -> Neural Spine Flow? Might be worth checking for others
+- Loss function
+- Full architecture
+
+
+
+
 - Update to pycbc noise
 - Update to pycbc data
 - Data pre-processing
