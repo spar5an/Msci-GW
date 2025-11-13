@@ -28,4 +28,5 @@ TODO FOR NORMALISING FLOWS
 - Update to pycbc noise
 - Update to pycbc data
 - Data pre-processing
+- Dropout + Batch Normalisation
 - Finished?
