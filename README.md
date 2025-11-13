@@ -22,7 +22,7 @@ TODO FOR NORMALISING FLOWS
 - Loss function
 - Full architecture
 
-
+REFACTOR JHPY to work with everything
 
 
 - Update to pycbc noise
