@@ -13,38 +13,26 @@ import random
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from tqdm import tqdm
 
-def generate_sine_data(data_points, mean, std, no_time_steps=360, noise_mean=0.0, noise_std=0.1, batch_size=16):
-    """
-    Generate synthetic sine wave data with Gaussian noise for training and testing.
+################### Miscellaneous functions ###################
 
-    Creates sine wave signals with randomly sampled amplitudes from a normal distribution,
-    adds Gaussian noise, and splits the data into train/validation/test sets with DataLoaders.
+def generate_sine_data(data_points, mean_amplitude, amplitude_std, no_time_steps=360, noise_mean=0.0, noise_std=0.1, batch_size=16):
+    """
+    Generate synthetic sine wave data with noise and return train/val/test DataLoaders.
 
     Args:
-        data_points (int): Number of sine wave signals to generate
-        mean (float): Mean of the normal distribution for sampling amplitudes
-        std (float): Standard deviation of the normal distribution for sampling amplitudes
-        no_time_steps (int, optional): Number of time steps in each signal. Defaults to 360.
-        noise_mean (float, optional): Mean of Gaussian noise (currently overridden in code). Defaults to 0.0.
-        noise_std (float, optional): Standard deviation of Gaussian noise (currently overridden in code). Defaults to 0.1.
-        batch_size (int, optional): Batch size for DataLoaders. Defaults to 16.
+        data_points (int): Number of sine waves to generate
+        mean (float): Mean of amplitude distribution
+        std (float): Std dev of amplitude distribution
+        no_time_steps (int, optional): Time steps per signal. Defaults to 360.
+        noise_mean (float, optional): Ignored; hardcoded to 0. Defaults to 0.0.
+        noise_std (float, optional): Ignored; hardcoded to 0.5. Defaults to 0.1.
+        batch_size (int, optional): Batch size for loaders. Defaults to 16.
 
     Returns:
-        dict: Dictionary containing:
-            - 'Amplitudes' (np.ndarray): Array of sampled amplitudes
-            - 'Signals' (np.ndarray): Clean sine wave signals
-            - 'Noised_Signals' (np.ndarray): Signals with added Gaussian noise
-            - 'Train_Loader' (DataLoader): Training data loader (80% of data)
-            - 'Test_Loader' (DataLoader): Test data loader (10% of data)
-            - 'Val_Loader' (DataLoader): Validation data loader (10% of data)
-
-    Note:
-        The time steps span from 0 to 120 linearly.
-        The noise parameters are currently hardcoded to mean=0 and std=0.5 in the function body,
-        ignoring the noise_mean and noise_std parameters.
+        dict: Contains 'Amplitudes', 'Signals', 'Noised_Signals', 'Train_Loader', 'Test_Loader', 'Val_Loader'.
     """
 
-    amplitudes = np.random.normal(mean, std, data_points)
+    amplitudes = np.random.normal(mean_amplitude, amplitude_std, data_points)
 
     time_steps = np.linspace(0,120,no_time_steps)
 
@@ -70,41 +58,28 @@ def generate_sine_data(data_points, mean, std, no_time_steps=360, noise_mean=0.0
     return {"Amplitudes": amplitudes, "Signals": signals, "Noised_Signals": noised_signals,
             "Train_Loader": train_loader, "Test_Loader": test_loader, "Val_Loader": val_loader}
     
+
+################### Neural Network Functions ###################
     
 def train_model(model, optimizer, loss_fcn, n_epochs, train_dloader, val_dloader, start_epoch = 0, patience = 8, scheduler=None, save_best_model=False, model_path='best_model.pt'):
     """
-    Train a PyTorch model with validation monitoring, early stopping, and optional model checkpointing.
-
-    Trains the model for a specified number of epochs, tracking training and validation losses
-    and metrics (MAE, RMSE, R²). Implements early stopping based on validation loss and
-    optionally saves the best model checkpoint.
+    Train model with early stopping, validation monitoring, and optional checkpointing.
 
     Args:
         model (nn.Module): PyTorch model to train
         optimizer (torch.optim.Optimizer): Optimizer for training
-        loss_fcn (callable): Loss function (e.g., nn.MSELoss())
+        loss_fcn (callable): Loss function
         n_epochs (int): Number of epochs to train
-        train_dloader (DataLoader): DataLoader for training data
-        val_dloader (DataLoader): DataLoader for validation data
-        start_epoch (int, optional): Starting epoch number (for resuming training). Defaults to 0.
-        patience (int, optional): Number of epochs to wait for improvement before early stopping. Defaults to 8.
-        scheduler (torch.optim.lr_scheduler, optional): Learning rate scheduler. Defaults to None.
-        save_best_model (bool, optional): Whether to save checkpoints of the best model. Defaults to False.
-        model_path (str, optional): Path to save the best model checkpoint. Defaults to 'best_model.pt'.
+        train_dloader (DataLoader): Training data loader
+        val_dloader (DataLoader): Validation data loader
+        start_epoch (int, optional): Starting epoch for resume. Defaults to 0.
+        patience (int, optional): Epochs to wait before early stopping. Defaults to 8.
+        scheduler (torch.optim.lr_scheduler, optional): LR scheduler. Defaults to None.
+        save_best_model (bool, optional): Save best model checkpoint. Defaults to False.
+        model_path (str, optional): Path for checkpoint. Defaults to 'best_model.pt'.
 
     Returns:
-        dict: Dictionary containing:
-            - 'train_losses' (list): Training losses for each epoch
-            - 'val_losses' (list): Validation losses for each epoch
-            - 'train_metrics' (list): Training metrics (MAE, RMSE, R²) for each epoch
-            - 'val_metrics' (list): Validation metrics (MAE, RMSE, R²) for each epoch
-            - 'best_val_loss' (float): Best validation loss achieved
-            - 'best_val_epoch' (int): Epoch number where best validation loss occurred
-
-    Note:
-        The function prints progress information for each epoch including losses and metrics.
-        If a scheduler is provided, it steps based on validation loss.
-        Training stops early if validation loss doesn't improve for 'patience' epochs.
+        dict: Contains 'train_losses', 'val_losses', 'train_metrics', 'val_metrics', 'best_val_loss', 'best_val_epoch'.
     """
     train_losses, val_losses = [], []
     train_metrics, val_metrics = [], []
@@ -215,25 +190,14 @@ def train_model(model, optimizer, loss_fcn, n_epochs, train_dloader, val_dloader
 
 def calculate_metrics(predictions, targets):
     """
-    Calculate regression metrics for parameter estimation.
-
-    Computes Mean Absolute Error (MAE), Root Mean Squared Error (RMSE),
-    and R² (coefficient of determination) for evaluating regression model performance.
+    Calculate MAE, RMSE, and R² metrics.
 
     Args:
         predictions (np.ndarray): Model predictions
-        targets (np.ndarray): True target values
+        targets (np.ndarray): Target values
 
     Returns:
-        dict: Dictionary containing:
-            - 'mae' (float): Mean Absolute Error
-            - 'rmse' (float): Root Mean Squared Error
-            - 'r2' (float): R² score (coefficient of determination)
-
-    Note:
-        R² ranges from -∞ to 1, where 1 indicates perfect prediction,
-        0 indicates the model performs as well as a simple mean,
-        and negative values indicate worse performance than the mean.
+        dict: Contains 'mae', 'rmse', 'r2'.
     """
     mae = np.mean(np.abs(predictions - targets))
     rmse = np.sqrt(np.mean((predictions - targets) ** 2))
@@ -251,31 +215,13 @@ def calculate_metrics(predictions, targets):
 
 def load_best_model(model_path='best_model.pt'):
     """
-    Load the best saved model checkpoint from disk.
-
-    Loads a ParameterPredictor model from a saved checkpoint file, including
-    the model state, configuration, and training history.
+    Load saved model checkpoint.
 
     Args:
-        model_path (str, optional): Path to the saved model checkpoint. Defaults to 'best_model.pt'.
+        model_path (str, optional): Path to checkpoint. Defaults to 'best_model.pt'.
 
     Returns:
-        tuple: A tuple containing:
-            - model (ParameterPredictor): Loaded model in evaluation mode
-            - checkpoint (dict): Full checkpoint dictionary containing:
-                - 'epoch' (int): Epoch number when model was saved
-                - 'model_state_dict' (dict): Model state dictionary
-                - 'optimizer_state_dict' (dict): Optimizer state dictionary
-                - 'best_val_loss' (float): Best validation loss achieved
-                - 'model_config' (dict): Model configuration
-                - 'train_losses' (list): Training loss history
-                - 'val_losses' (list): Validation loss history
-                - 'train_metrics' (list): Training metrics history
-                - 'val_metrics' (list): Validation metrics history
-
-    Note:
-        Prints information about the loaded model including epoch number
-        and best validation loss achieved.
+        tuple: (model, checkpoint dict)
     """
     checkpoint = torch.load(model_path, weights_only=False)
     
@@ -292,18 +238,17 @@ def load_best_model(model_path='best_model.pt'):
 
 def hyperparameter_search(param_grid, train_loader, val_loader, n_epochs=20, n_trials=None):
     """
-    Search for the best hyperparameter configuration.
-    
+    Search for best hyperparameter configuration.
+
     Args:
-        param_grid: Dictionary of parameter names to lists of values to try
+        param_grid: Dict of parameter names to value lists
         train_loader: Training data loader
         val_loader: Validation data loader
-        n_epochs: Number of epochs to train each configuration
-        n_trials: Number of random configurations to try (None = try all combinations)
-    
+        n_epochs: Epochs per configuration. Defaults to 20.
+        n_trials: Random trials to try; None = all combinations. Defaults to None.
+
     Returns:
-        best_config: Dictionary with the best configuration
-        results: List of dictionaries with all trial results
+        tuple: (best_config dict, results list)
     """
 
     
@@ -407,46 +352,24 @@ def hyperparameter_search(param_grid, train_loader, val_loader, n_epochs=20, n_t
     results.sort(key=lambda x: x['best_val_loss'])
     
     return best_config, results
+################### Neural Network Layers ###################
 
+################### Models ###################
 
 class ParameterPredictor(nn.Module):
     """
-    LSTM-based neural network for parameter prediction from time series data.
+    LSTM-based neural network for predicting scalar parameters from time series.
 
-    A configurable PyTorch model that uses an LSTM to process sequential data
-    followed by fully connected layers for regression tasks. Designed for
-    predicting scalar parameters from time series signals.
-
-    Attributes:
-        config (dict): Configuration dictionary containing model hyperparameters
-        lstm (nn.LSTM): LSTM layer(s) for processing sequential data
-        fc (nn.Sequential): Fully connected layers for final prediction
-
-    Default Configuration:
-        - lstm_hidden_size (int): 256 - Hidden size of LSTM layers
-        - lstm_num_layers (int): 1 - Number of stacked LSTM layers
-        - fc_layer_sizes (list): [128, 64] - Sizes of fully connected layers
-        - activation (str): 'silu' - Activation function ('silu', 'relu', or 'tanh')
-        - dropout (float): 0.0 - Dropout probability for regularization
-
-    Example:
-        >>> config = {'lstm_hidden_size': 128, 'dropout': 0.2}
-        >>> model = ParameterPredictor(config)
-        >>> output = model(input_tensor)  # input shape: [batch, sequence_length]
+    Configurable model with LSTM layers followed by fully connected layers.
+    Config options: lstm_hidden_size (256), lstm_num_layers (1), fc_layer_sizes ([128, 64]),
+    activation ('silu'/'relu'/'tanh'), dropout (0.0).
     """
     def __init__(self, config=None):
         """
-        Initialize the ParameterPredictor model.
+        Initialize model with optional config overrides.
 
         Args:
-            config (dict, optional): Configuration dictionary to override default hyperparameters.
-                Can include:
-                - 'lstm_hidden_size' (int): Hidden size of LSTM
-                - 'lstm_num_layers' (int): Number of LSTM layers
-                - 'fc_layer_sizes' (list): Sizes of FC layers
-                - 'activation' (str): Activation function type
-                - 'dropout' (float): Dropout probability
-                Defaults to None, which uses all default values.
+            config (dict, optional): Config dict with lstm_hidden_size, lstm_num_layers, fc_layer_sizes, activation, dropout.
         """
         super().__init__()
         
@@ -501,22 +424,13 @@ class ParameterPredictor(nn.Module):
     
     def forward(self, x):
         """
-        Forward pass through the model.
-
-        Processes input time series through LSTM layers and fully connected layers
-        to produce a scalar prediction for each sample in the batch.
+        Forward pass: process time series through LSTM and FC layers.
 
         Args:
-            x (torch.Tensor): Input tensor of shape [batch, sequence_length]
-                containing time series data
+            x (torch.Tensor): Input shape [batch, sequence_length]
 
         Returns:
-            torch.Tensor: Output predictions of shape [batch] containing
-                scalar predictions for each sample
-
-        Note:
-            The input is automatically reshaped to [batch, sequence, 1] for LSTM processing.
-            The final LSTM hidden state is used for prediction.
+            torch.Tensor: Output shape [batch] with scalar predictions
         """
         # Reshape input to [batch, sequence, features]
         x = x.unsqueeze(-1)  # Add feature dimension: [batch, 4000, 1]

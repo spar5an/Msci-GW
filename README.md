@@ -19,10 +19,13 @@ TODO FOR NORMALISING FLOWS
 
 
 REFACTOR JHPY to work with everything --> working on this now
+- Rewrite dingo_style using functions in jhpy
+- Update training function?
+- Guassian function from pytorch
 
 - Update to pycbc data
 - Update to pycbc noise
 - Data pre-processing
 - Dropout + Batch Normalisation
 - Transforms -> Neural Spine Flow? Might be worth checking for others
-- Hyper parameter search for best
+- Hyper parameter search for best transforms/context layers, CNN, LSTM etc
