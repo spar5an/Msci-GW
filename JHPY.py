@@ -15,47 +15,81 @@ from tqdm import tqdm
 
 ################### Miscellaneous functions ###################
 
-def generate_sine_data(data_points, mean_amplitude, amplitude_std, no_time_steps=360, noise_mean=0.0, noise_std=0.1, batch_size=16):
+def simulate_sine_wave(frequency, num_points=1000, noise_std=0.1, amplitude=1.0, phase=0):
     """
-    Generate synthetic sine wave data with noise and return train/val/test DataLoaders.
+    Generate noisy sine wave with given frequency, amplitude, and phase.
 
     Args:
-        data_points (int): Number of sine waves to generate
-        mean (float): Mean of amplitude distribution
-        std (float): Std dev of amplitude distribution
-        no_time_steps (int, optional): Time steps per signal. Defaults to 360.
-        noise_mean (float, optional): Ignored; hardcoded to 0. Defaults to 0.0.
-        noise_std (float, optional): Ignored; hardcoded to 0.5. Defaults to 0.1.
-        batch_size (int, optional): Batch size for loaders. Defaults to 16.
+        frequency: sine wave frequency
+        num_points: number of time points. Defaults to 1000.
+        noise_std: Gaussian noise std dev. Defaults to 0.1.
+        amplitude: sine amplitude. Defaults to 1.0.
+        phase: phase shift. Defaults to 0.
 
     Returns:
-        dict: Contains 'Amplitudes', 'Signals', 'Noised_Signals', 'Train_Loader', 'Test_Loader', 'Val_Loader'.
+        ndarray: Noisy sine wave observations.
     """
+    t = np.linspace(0, 6*np.pi, num_points)
+    signal = amplitude * np.sin(2*np.pi*frequency * t + phase)
+    noise = np.random.normal(0, noise_std, num_points)
+    observed_data = signal + noise
+    return observed_data
 
-    amplitudes = np.random.normal(mean_amplitude, amplitude_std, data_points)
+def generate_sine_data(num_simulations=10000, freq_low=0.5, freq_high=5.0, phase_low=-3, phase_high=3, amplitude_low=0.5, amplitude_high=3.0, num_points=1000, noise_std=0.1, batch_size=256):
+    """
+    Generate vectorized training dataset with sine signals and DataLoaders.
 
-    time_steps = np.linspace(0,120,no_time_steps)
+    Args:
+        num_simulations: number of samples. Defaults to 10000.
+        freq_low, freq_high: frequency range. Defaults to 0.5, 5.0.
+        phase_low, phase_high: phase range. Defaults to -3, 3.
+        amplitude_low, amplitude_high: amplitude range. Defaults to 0.5, 3.0.
+        num_points: time points per signal. Defaults to 1000.
+        noise_std: noise std dev. Defaults to 0.1.
+        batch_size: DataLoader batch size. Defaults to 256.
 
-    signals = np.array([np.sin(time_steps)*a for a in amplitudes])
-
-    # adding noise, just gaussian for the time being
-    noise_mean = 0
-    noise_std = 0.5
-    noised_signals = np.array([x + np.random.normal(noise_mean, noise_std, no_time_steps) for x in signals])
-
-    # convert to pytorch datasets
-    X = torch.FloatTensor(noised_signals)
-    y = torch.FloatTensor(amplitudes)
-
-    data = TensorDataset(X,y)
-
+    Returns:
+        dict: Amplitudes, Phases, Frequencies tensors and Train/Test/Val_Loader DataLoaders.
+    """
+    print(f"generating {num_simulations} samples for training")
+    
+    # Vectorized sampling - generate all parameters at once
+    frequencies = np.random.uniform(freq_low, freq_high, num_simulations)
+    phases = np.random.uniform(phase_low, phase_high, num_simulations)
+    amplitudes = np.random.uniform(amplitude_low, amplitude_high, num_simulations)
+    
+    # Create time array
+    t = np.linspace(0, 6*np.pi, num_points)
+    
+    # Vectorized signal generation: shape [num_simulations, num_points]
+    # Broadcasting: frequencies, phases, amplitudes are [num_simulations, 1] or [num_simulations]
+    # t is [num_points]
+    signal = amplitudes[:, np.newaxis] * np.sin(
+        2*np.pi*frequencies[:, np.newaxis] * t + phases[:, np.newaxis]
+    )
+    
+    # Generate noise for all signals at once
+    noise = np.random.normal(0, noise_std, (num_simulations, num_points))
+    
+    # Add noise to signals
+    data = signal + noise
+    
+    # Convert to tensors
+    frequencies = torch.FloatTensor(frequencies).unsqueeze(1)  # [N, 1]
+    phases = torch.FloatTensor(phases).unsqueeze(1)  # [N, 1]
+    amplitudes = torch.FloatTensor(amplitudes).unsqueeze(1)  # [N, 1]
+    
+    data = torch.FloatTensor(data)  # [N, num_points]    
+    
     train_data, val_data, test_data = random_split(data, lengths=[0.8,0.1,0.1])
 
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
     
-    return {"Amplitudes": amplitudes, "Signals": signals, "Noised_Signals": noised_signals,
+    print("data generated")
+    
+    return {"Amplitudes": amplitudes, "Phases": phases, "Frequencies":frequencies,
             "Train_Loader": train_loader, "Test_Loader": test_loader, "Val_Loader": val_loader}
     
 
