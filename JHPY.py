@@ -53,34 +53,25 @@ def generate_sine_data(num_simulations=10000, freq_low=0.5, freq_high=5.0, phase
     """
     print(f"generating {num_simulations} samples for training")
     
-    # Vectorized sampling - generate all parameters at once
+    # Sample parameter ranges
     frequencies = np.random.uniform(freq_low, freq_high, num_simulations)
     phases = np.random.uniform(phase_low, phase_high, num_simulations)
     amplitudes = np.random.uniform(amplitude_low, amplitude_high, num_simulations)
-    
-    # Create time array
+
     t = np.linspace(0, 6*np.pi, num_points)
-    
-    # Vectorized signal generation: shape [num_simulations, num_points]
-    # Broadcasting: frequencies, phases, amplitudes are [num_simulations, 1] or [num_simulations]
-    # t is [num_points]
+
+    # Generate signals with broadcasting
     signal = amplitudes[:, np.newaxis] * np.sin(
         2*np.pi*frequencies[:, np.newaxis] * t + phases[:, np.newaxis]
     )
-    
-    # Generate noise for all signals at once
+
     noise = np.random.normal(0, noise_std, (num_simulations, num_points))
-    
-    # Add noise to signals
-    X = torch.FloatTensor(signal + noise)  # [num_simulations, num_points]
+    X = torch.FloatTensor(signal + noise)
+    y = torch.FloatTensor(np.column_stack([amplitudes, frequencies, phases]))
 
-    # Stack parameters as labels: [num_simulations, 3] with columns [amplitude, frequency, phase]
-    y = torch.FloatTensor(np.column_stack([amplitudes, frequencies, phases]))  # [num_simulations, 3]
-
-    # Convert to tensors for return
-    frequencies = torch.FloatTensor(frequencies).unsqueeze(1)  # [N, 1]
-    phases = torch.FloatTensor(phases).unsqueeze(1)  # [N, 1]
-    amplitudes = torch.FloatTensor(amplitudes).unsqueeze(1)  # [N, 1]
+    frequencies = torch.FloatTensor(frequencies).unsqueeze(1)
+    phases = torch.FloatTensor(phases).unsqueeze(1)
+    amplitudes = torch.FloatTensor(amplitudes).unsqueeze(1)
 
     data = TensorDataset(X, y)  
     
@@ -109,16 +100,14 @@ class AffineCouplingLayer(nn.Module):
         super().__init__()
         self.dim = dim
 
-        # Create mask (which dimensions to transform)
-        # For 2D: 'even' = [1,0] (transform 2nd), 'odd' = [0,1] (transform 1st)
-        # For 3D: 'even' = [1,0,1] (transform 2nd), 'odd' = [0,1,0] (transform 1st & 3rd)
+        # Create alternating mask for coupling layer
         self.register_buffer('mask', torch.zeros(dim))
         if mask_type in ['half', 'even']:
-            self.mask[::2] = 1  # Set every other dimension starting from 0: [1,0,1,0,...]
+            self.mask[::2] = 1
         elif mask_type == 'odd':
-            self.mask[1::2] = 1  # Set every other dimension starting from 1: [0,1,0,1,...]
+            self.mask[1::2] = 1
 
-        # Networks for scale (s) and translation (t) - EXACT from working notebook
+        # Scale and translation networks
         self.scale_net = nn.Sequential(
             nn.Linear(dim + context_dim, hidden_dim),
             nn.ReLU(),
@@ -229,12 +218,9 @@ class ParameterPredictor(nn.Module):
             'dropout': 0.0,  # Dropout probability
         }
 
-        # Merge with provided config
         if config is None:
             config = {}
         self.config = {**default_config, **config}
-
-        # Build LSTM
         self.lstm = nn.LSTM(
             input_size=1,
             hidden_size=self.config['lstm_hidden_size'],
@@ -243,14 +229,12 @@ class ParameterPredictor(nn.Module):
             dropout=self.config['dropout'] if self.config['lstm_num_layers'] > 1 else 0.0
         )
 
-        # Build fully connected layers
         fc_layers = []
         input_size = self.config['lstm_hidden_size']
 
         for hidden_size in self.config['fc_layer_sizes']:
             fc_layers.append(nn.Linear(input_size, hidden_size))
 
-            # Add activation
             if self.config['activation'] == 'silu':
                 fc_layers.append(nn.SiLU())
             elif self.config['activation'] == 'relu':
@@ -258,13 +242,11 @@ class ParameterPredictor(nn.Module):
             elif self.config['activation'] == 'tanh':
                 fc_layers.append(nn.Tanh())
 
-            # Add dropout if specified
             if self.config['dropout'] > 0:
                 fc_layers.append(nn.Dropout(self.config['dropout']))
 
             input_size = hidden_size
 
-        # Output layer (3 parameters: amplitude, frequency, phase)
         fc_layers.append(nn.Linear(input_size, 3))
 
         self.fc = nn.Sequential(*fc_layers)
@@ -279,10 +261,8 @@ class ParameterPredictor(nn.Module):
         Returns:
             torch.Tensor: Output shape [batch, 3] with predictions for amplitude, frequency, phase
         """
-        # Reshape input to [batch, sequence, features]
-        x = x.unsqueeze(-1)  # Add feature dimension: [batch, sequence_length, 1]
+        x = x.unsqueeze(-1)
         lstm_out, _ = self.lstm(x)
-        # Use last output for prediction
         last_out = lstm_out[:, -1, :]
         return self.fc(last_out)
 
@@ -323,9 +303,8 @@ class NormalizingFlow(nn.Module):
             for i in range(num_layers)
         ])
 
-        # Base distribution: standard Gaussian
-        self.register_buffer('base_mean', torch.zeros(param_dim))
-        self.register_buffer('base_std', torch.ones(param_dim))
+        # Base distribution: standard Gaussian using PyTorch distributions
+        self.base_dist = dist.Normal(loc=0.0, scale=1.0)
 
     def forward(self, params, context):
         """
@@ -346,10 +325,8 @@ class NormalizingFlow(nn.Module):
             z, log_det = layer(z, context, reverse=False)
             log_det_sum += log_det
 
-        # Compute log probability under base distribution
-        log_prob_base = -0.5 * (torch.log(2 * np.pi * self.base_std**2) +
-                                 ((z - self.base_mean) / self.base_std)**2)
-        log_prob_base = log_prob_base.sum(dim=1)
+        # Compute log probability under base distribution using PyTorch distributions
+        log_prob_base = self.base_dist.log_prob(z).sum(dim=1)
 
         # Apply change of variables
         log_prob = log_prob_base + log_det_sum
@@ -369,11 +346,10 @@ class NormalizingFlow(nn.Module):
         """
         batch_size = context.shape[0]
 
-        # Repeat context for multiple samples
         context_repeated = context.repeat_interleave(num_samples, dim=0)
 
-        # Sample from base distribution
-        z = torch.randn(batch_size * num_samples, self.param_dim, device=context.device)
+        # Sample from base distribution using PyTorch distributions
+        z = self.base_dist.sample((batch_size * num_samples, self.param_dim)).to(context.device)
 
         # Apply inverse flow transformations
         for layer in reversed(self.layers):
@@ -456,7 +432,7 @@ class DINGOModel(nn.Module):
 
 ################### Training Functions ###################
     
-def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=8, scheduler=None, save_best_model=False, model_path='best_predictor_model.pt', grad_clip_norm=5.0, dropout_rate=None):
+def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=8, scheduler=None, save_best_model=True, model_path='best_predictor_model.pt', grad_clip_norm=5.0, dropout_rate=None):
     """
     Train model with early stopping, validation monitoring, gradient clipping, and optional checkpointing.
 
@@ -470,7 +446,7 @@ def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, v
         start_epoch (int, optional): Starting epoch for resume. Defaults to 0.
         patience (int, optional): Epochs to wait before early stopping. Defaults to 8.
         scheduler (torch.optim.lr_scheduler, optional): LR scheduler. Defaults to None.
-        save_best_model (bool, optional): Save best model checkpoint. Defaults to False.
+        save_best_model (bool, optional): Save best model checkpoint. Defaults to True.
         model_path (str, optional): Path for checkpoint. Defaults to 'best_predictor_model.pt'.
         grad_clip_norm (float, optional): Max gradient norm for clipping. Set to None to disable. Defaults to 5.0.
         dropout_rate (float, optional): Dropout probability (0.0-1.0). None uses model's default. Defaults to None.
@@ -554,9 +530,22 @@ def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, v
 
         # Learning rate scheduling
         if scheduler is not None:
+            old_lr = [param_group['lr'] for param_group in optimizer.param_groups]
             scheduler.step(avg_val_loss)
-            current_lr = [param_group['lr'] for param_group in optimizer.param_groups]
-            print(f"Current learning rates: {current_lr}")
+            new_lr = [param_group['lr'] for param_group in optimizer.param_groups]
+
+            # If learning rate changed, load best model and continue training
+            if old_lr != new_lr and save_best_model:
+                print(f"Learning rate reduced. Loading best model from {model_path}")
+                checkpoint = torch.load(model_path, weights_only=False)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Keep the reduced learning rate by reapplying it to all param groups
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = new_lr[optimizer.param_groups.index(param_group)]
+                print("Best model loaded, resuming training\n")
+
+            print(f"Current learning rates: {new_lr}")
 
         # Early stopping check
         if avg_val_loss < best_val_loss:
@@ -593,7 +582,7 @@ def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, v
         'best_val_epoch': best_val_epoch
     }
     
-def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=15, scheduler=None, save_best_model=False, model_path='best_npe_model.pt', grad_clip_norm=5.0, dropout_rate=None):
+def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=15, scheduler=None, save_best_model=True, model_path='best_npe_model.pt', grad_clip_norm=5.0, dropout_rate=None):
     """
     Train NPE model with log probability, early stopping, validation monitoring, and optional checkpointing.
 
@@ -604,10 +593,10 @@ def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, star
         train_dloader (DataLoader): Training data loader
         val_dloader (DataLoader): Validation data loader
         start_epoch (int, optional): Starting epoch for resume. Defaults to 0.
-        patience (int, optional): Epochs to wait for improvement before early stopping. Defaults to 8.
+        patience (int, optional): Epochs to wait for improvement before early stopping. Defaults to 15.
         scheduler (torch.optim.lr_scheduler, optional): LR scheduler. Defaults to None.
-        save_best_model (bool, optional): Save best model checkpoint. Defaults to False.
-        model_path (str, optional): Path for checkpoint. Defaults to 'best_model.pt'.
+        save_best_model (bool, optional): Save best model checkpoint. Defaults to True.
+        model_path (str, optional): Path for checkpoint. Defaults to 'best_npe_model.pt'.
         grad_clip_norm (float, optional): Max gradient norm for clipping. Set to None to disable. Defaults to 5.0.
         dropout_rate (float, optional): Dropout probability (0.0-1.0). None uses model's default. Defaults to None.
 
@@ -663,11 +652,24 @@ def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, star
         print(f"Training - Log Prob: {avg_train_log_prob:.4f}")
         print(f"Validation - Log Prob: {avg_val_log_prob:.4f}")
 
-        # Learning rate scheduling (inverted: higher log prob is better)
+        # Learning rate scheduling (higher log prob is better)
         if scheduler is not None:
+            old_lr = [param_group['lr'] for param_group in optimizer.param_groups]
             scheduler.step(avg_val_log_prob)
-            current_lr = [param_group['lr'] for param_group in optimizer.param_groups]
-            print(f"Current learning rates: {current_lr}")
+            new_lr = [param_group['lr'] for param_group in optimizer.param_groups]
+
+            # If learning rate changed, load best model and continue training
+            if old_lr != new_lr and save_best_model:
+                print(f"Learning rate reduced. Loading best model from {model_path}")
+                checkpoint = torch.load(model_path, weights_only=False)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Keep the reduced learning rate by reapplying it to all param groups
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = new_lr[optimizer.param_groups.index(param_group)]
+                print("Best model loaded, resuming training\n")
+
+            print(f"Current learning rates: {new_lr}")
 
         # Early stopping check (higher log prob is better)
         if avg_val_log_prob > best_val_log_prob:
@@ -716,7 +718,6 @@ def calculate_metrics(predictions, targets):
     mae = np.mean(np.abs(predictions - targets))
     rmse = np.sqrt(np.mean((predictions - targets) ** 2))
     
-    # R² score
     ss_res = np.sum((targets - predictions) ** 2)
     ss_tot = np.sum((targets - np.mean(targets)) ** 2)
     r2 = 1 - (ss_res / ss_tot)
@@ -739,7 +740,6 @@ def load_predictor(model_path='best_predictor_model.pt'):
     """
     checkpoint = torch.load(model_path, weights_only=False)
 
-    # Recreate model with saved config
     model = ParameterPredictor(checkpoint['model_config'])
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -763,7 +763,6 @@ def load_npe(model_path='best_npe_model.pt', model_class=DINGOModel):
     """
     checkpoint = torch.load(model_path, weights_only=False)
 
-    # Recreate model with saved config - pass as keyword argument
     model = model_class(config=checkpoint['model_config'])
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -811,21 +810,17 @@ def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epoc
     print(f"Testing {len(all_combinations)} configurations...\n")
     
     for i, combo in enumerate(all_combinations):
-        # Create config dictionary
         config = dict(zip(param_names, combo))
-        
+
         print(f"{'='*60}")
         print(f"Trial {i+1}/{len(all_combinations)}")
         print(f"Config: {config}")
         print(f"{'='*60}")
-        
-        # Create model with this configuration
+
         model = ParameterPredictor(config)
-        
-        # Create optimizer and scheduler
         lr = config.get('learning_rate', 0.01)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        
+
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
@@ -833,10 +828,9 @@ def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epoc
             patience=2,
             min_lr=1e-6,
         )
-        
+
         loss_fcn = nn.MSELoss()
-        
-        # Train the model
+
         try:
             outputs = train_predictor_model(
                 model,
@@ -850,11 +844,9 @@ def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epoc
                 save_best_model=False
             )
 
-            # Get best validation loss
             final_val_loss = min(outputs['val_losses'])
             final_val_metrics = outputs['val_metrics'][outputs['val_losses'].index(final_val_loss)]
 
-            # Store results
             result = {
                 'config': config.copy(),
                 'best_val_loss': final_val_loss,
@@ -868,11 +860,9 @@ def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epoc
             print(f"\nFinal validation loss: {final_val_loss:.4f}")
             print(f"Best validation R²: {final_val_metrics['r2']:.4f}\n")
 
-            # Update best configuration and save best model
             if final_val_loss < best_val_loss:
                 best_val_loss = final_val_loss
                 best_config = config.copy()
-                # Save the best model so far
                 checkpoint = {
                     'epoch': len(outputs['val_losses']) - 1,
                     'model_state_dict': model.state_dict(),
@@ -889,8 +879,7 @@ def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epoc
         except Exception as e:
             print(f"Error training with config {config}: {e}\n")
             continue
-    
-    # Print summary
+
     print(f"\n{'='*60}")
     print("HYPERPARAMETER SEARCH COMPLETE")
     print(f"{'='*60}")
@@ -898,8 +887,7 @@ def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epoc
     for key, value in best_config.items():
         print(f"  {key}: {value}")
     print(f"\nBest validation loss: {best_val_loss:.4f}")
-    
-    # Sort results by validation loss
+
     results.sort(key=lambda x: x['best_val_loss'])
     
     return best_config, results
@@ -941,7 +929,6 @@ def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=
     print(f"Testing {len(all_combinations)} configurations with {model_class.__name__}...\n")
 
     for i, combo in enumerate(all_combinations):
-        # Create config dictionary
         config = dict(zip(param_names, combo))
 
         print(f"{'='*60}")
@@ -949,26 +936,21 @@ def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=
         print(f"Config: {config}")
         print(f"{'='*60}")
 
-        # Create model with this configuration
         model = model_class(config=config)
-
-        # Create optimizer and scheduler
         lr = config.get('learning_rate', 0.001)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            mode='max',  # Higher log prob is better for NPE
+            mode='max',
             factor=0.5,
             patience=2,
             min_lr=1e-7,
         )
 
-        # Extract grad_clip_norm and dropout_rate if present
         grad_clip_norm = config.get('grad_clip_norm', 5.0)
         dropout_rate = config.get('dropout_rate', None)
 
-        # Train the model
         try:
             outputs = train_npe_model(
                 model,
@@ -983,10 +965,8 @@ def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=
                 save_best_model=False
             )
 
-            # Get best validation log prob
             final_val_log_prob = max(outputs['val_log_probs'])
 
-            # Store results
             result = {
                 'config': config.copy(),
                 'best_val_log_prob': final_val_log_prob,
@@ -996,11 +976,9 @@ def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=
 
             print(f"\nFinal validation log prob: {final_val_log_prob:.4f}\n")
 
-            # Update best configuration and save best model
             if final_val_log_prob > best_val_log_prob:
                 best_val_log_prob = final_val_log_prob
                 best_config = config.copy()
-                # Save the best model so far
                 checkpoint = {
                     'epoch': len(outputs['val_log_probs']) - 1,
                     'model_state_dict': model.state_dict(),
@@ -1016,7 +994,6 @@ def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=
             print(f"Error training with config {config}: {e}\n")
             continue
 
-    # Print summary
     print(f"\n{'='*60}")
     print("NPE HYPERPARAMETER SEARCH COMPLETE")
     print(f"{'='*60}")
@@ -1025,7 +1002,6 @@ def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=
         print(f"  {key}: {value}")
     print(f"\nBest validation log prob: {best_val_log_prob:.4f}")
 
-    # Sort results by log prob (descending)
     results.sort(key=lambda x: x['best_val_log_prob'], reverse=True)
 
     return best_config, results
@@ -1044,19 +1020,15 @@ def infer_NPE(model, observed_data, num_samples=5000):
         statistics: dict with mean, median, std, quantiles
     """
     model.eval()
-    
-    # Prepare data
-    data_tensor = torch.FloatTensor(observed_data).unsqueeze(0)  # [1, data_dim]
-    
-    # Sample from posterior
+
+    data_tensor = torch.FloatTensor(observed_data).unsqueeze(0)
+
     with torch.no_grad():
         samples = model.sample_posterior(data_tensor, num_samples=num_samples)
-        samples = samples.numpy()  # [num_samples, param_dim]
-    
-    # For 1D parameters, flatten; for multi-D, keep as is
+        samples = samples.numpy()
+
     if samples.shape[1] == 1:
         samples = samples.flatten()
-        # Compute statistics
         statistics = {
             'mean': np.mean(samples),
             'median': np.median(samples),
@@ -1065,8 +1037,6 @@ def infer_NPE(model, observed_data, num_samples=5000):
             'q95': np.percentile(samples, 95),
         }
     else:
-        # For multi-dimensional parameters, return samples as-is
-        # Statistics computation will be done per parameter
         statistics = None
     
     return samples, statistics
