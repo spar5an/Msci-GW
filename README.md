@@ -20,7 +20,7 @@ TODO:
     - Update training function --> Done
     - Guassian function from pytorch --> Done
 
-- For training function, get it to revert to best model when scheduler activates
+- For training function, get it to revert to best model when scheduler activates --> Done
 - Update to pycbc data
 - Update to pycbc noise
 
