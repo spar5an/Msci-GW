@@ -10,21 +10,21 @@ TODO:
 - Training loop -> Done
 - Testing of trained model --> Done
 - Parameter Search for best model --> Done
+- TODO FOR NORMALISING FLOWS --> Done
+    - Basic model first, just mapping from latent to parameter space, nothing conditional yet --> Done
+    - Data structure: Check how to read in the data correctly --> Done
+    - Loss function --> Done
+    - Full architecture --> DONE BY HAMZA TYVM HAMZA
+- REFACTOR JHPY to work with everything --> Done
+    - Rewrite dingo_style using functions in jhpy --> Done
+    - Update training function --> Done
+    - Guassian function from pytorch --> Done
 
-TODO FOR NORMALISING FLOWS
-- Basic model first, just mapping from latent to parameter space, nothing conditional yet --> Done
-- Data structure: Check how to read in the data correctly --> Done
-- Loss function --> Done
-- Full architecture --> DONE BY HAMZA TYVM HAMZA
-
-
-REFACTOR JHPY to work with everything --> working on this now
-- Rewrite dingo_style using functions in jhpy
-- Update training function?
-- Guassian function from pytorch
-
+- For training function, get it to revert to best model when scheduler activates
 - Update to pycbc data
 - Update to pycbc noise
+
+
 - Data pre-processing
 - Dropout + Batch Normalisation
 - Transforms -> Neural Spine Flow? Might be worth checking for others
