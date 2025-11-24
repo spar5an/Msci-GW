@@ -4,24 +4,14 @@ Code/notes base for Msci project on gravitational waves and machine learning at 
 At this point in time, just messing around with feature extraction from time series data.
 
 TODO:
-- Generate simple data -> Done
-- Add noise -> Done
-- Build NN model for parameter estimation --> Done
-- Training loop -> Done
-- Testing of trained model --> Done
-- Parameter Search for best model --> Done
-- TODO FOR NORMALISING FLOWS --> Done
-    - Basic model first, just mapping from latent to parameter space, nothing conditional yet --> Done
-    - Data structure: Check how to read in the data correctly --> Done
-    - Loss function --> Done
-    - Full architecture --> DONE BY HAMZA TYVM HAMZA
-- REFACTOR JHPY to work with everything --> Done
-    - Rewrite dingo_style using functions in jhpy --> Done
-    - Update training function --> Done
-    - Guassian function from pytorch --> Done
-
-- For training function, get it to revert to best model when scheduler activates --> Done
 - Update to pycbc data
+    - Generate lots of data
+    - Apply it to h1 and l1
+    - make it into torch tensors
+    - datasets
+    - time parameter?
+
+
 - Update to pycbc noise
 
 
