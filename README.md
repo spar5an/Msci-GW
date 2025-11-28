@@ -19,6 +19,12 @@ TODO:
     - Rewrite dingo_style using functions in jhpy --> Done
     - Update training function --> Done
     - Guassian function from pytorch --> Done
+- HPC TODO
+    - Learn how to use HPC --> Done
+    - Rewrite dingo_npe to be able to be used in HPC --> Done
+    - Enable GPU compatitibility and optimisation --> Done (and super fast)
+    - Train model on real PyCBC data
+    - Update model depending on results
 
 - For training function, get it to revert to best model when scheduler activates --> Done
 - Update to pycbc data
