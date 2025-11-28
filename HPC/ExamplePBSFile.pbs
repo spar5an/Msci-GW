@@ -1,0 +1,39 @@
+#!/bin/bash
+#PBS -N test_pycbc
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=16gb:ngpus=1 #only Remove GPU bit for CPU-only action
+#PBS -j oe
+
+# 1) Clean module environment
+module purge
+
+# 2) Load the same modules as used to create the venv
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+module load CUDA/11.7.0
+
+# 3) Activate the SAME virtual environment where PyCBC is installed
+#    Use the FULL PATH you got from `realpath`
+source /rds/general/user/hm2622/home/venv/pycbcenv/bin/activate
+
+# 4) Go to the directory from which qsub was run
+cd "$PBS_O_WORKDIR"
+
+# 5) Debug information
+echo "=== DEBUG INFO ==="
+echo "hostname: $(hostname)"
+echo "pwd: $(pwd)"
+echo "which python: $(which python)"
+python -V
+
+echo "=== Try importing pycbc in PBS job ==="
+python -c "import pycbc, sys; print('pycbc OK in PBS'); print('pycbc file:', pycbc.__file__); print('python exe:', sys.executable)"
+
+echo "Host: $(hostname)"
+echo "GPUs visible to CUDA:"
+nvidia-smi || echo "nvidia-smi not available / no GPU?"
+
+echo "=== Run test_pycbc.py ==="
+python dingo_npe_gpu.py
+
+echo "=== Done ==="
