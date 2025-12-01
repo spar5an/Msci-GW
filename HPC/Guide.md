@@ -24,18 +24,18 @@ module load Python/3.11.3-GCCcore-12.3.0
 We’ll remove the old venv (if it exists) and make a new, clean one.
 
 ```bash
-rm -rf ~/venv/pycbc-env        # delete old venv if it exists
+rm -rf ~/venv/pycbcenv        # delete old venv if it exists
 mkdir -p ~/venv
-python -m venv ~/venv/pycbc-env
+python -m venv ~/venv/pycbcenv
 ```
 
 Activate it:
 
 ```bash
-source ~/venv/pycbc-env/bin/activate
+source ~/venv/pycbcenv/bin/activate
 ```
 
-Your prompt should now start with something like `(pycbc-env)`.
+Your prompt should now start with something like `(pycbcenv)`.
 
 Upgrade pip and install `pycbc`:
 
@@ -56,8 +56,8 @@ You should see something like:
 
 ```text
 pycbc OK
-pycbc file: /rds/general/user/hm2622/home/venv/pycbc-env/lib/python3.11/site-packages/pycbc/__init__.py
-python exe: /rds/general/user/hm2622/home/venv/pycbc-env/bin/python
+pycbc file: /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
+python exe: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
 ```
 
 If this fails, stop here and paste the error.
@@ -69,15 +69,15 @@ If this fails, stop here and paste the error.
 Let’s record the exact absolute path so we can use it in the PBS script:
 
 ```bash
-realpath ~/venv/pycbc-env
-realpath ~/venv/pycbc-env/bin/activate
+realpath ~/venv/pycbcenv
+realpath ~/venv/pycbcenv/bin/activate
 ```
 
 You should get:
 
 ```text
-/rds/general/user/hm2622/home/venv/pycbc-env
-/rds/general/user/hm2622/home/venv/pycbc-env/bin/activate
+/rds/general/user/hm2622/home/venv/pycbcenv
+/rds/general/user/hm2622/home/venv/pycbcenv/bin/activate
 ```
 
 We will use this exact path in the PBS script.
@@ -126,7 +126,7 @@ python test_pycbc.py
 Expected output:
 
 - `=== Inside test_pycbc.py ===`
-- `Python executable: /rds/general/user/hm2622/home/venv/pycbc-env/bin/python`
+- `Python executable: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python`
 - `PyCBC imported OK, version: ...`
 
 If that fails, paste the full output and stop here.
@@ -158,7 +158,7 @@ module purge   # 1) Clean module environment
 module load tools/prod   # 2) Load the same modules as used to create the venv
 module load Python/3.11.3-GCCcore-12.3.0
 
-source /rds/general/user/hm2622/home/venv/pycbc-env/bin/activate    # 3) Activate the SAME virtual environment where PyCBC is installed
+source /rds/general/user/hm2622/home/venv/pycbcenv/bin/activate    # 3) Activate the SAME virtual environment where PyCBC is installed
 								                                                    #    Use the FULL PATH you got from `realpath`
 
 cd "$PBS_O_WORKDIR"	  # 4) Go to the directory from which qsub was run
