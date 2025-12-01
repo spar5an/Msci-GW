@@ -1,8 +1,11 @@
 #!/bin/bash
 #PBS -N test_pycbc
 #PBS -l walltime=01:00:00
-#PBS -l select=1:ncpus=4:mem=16gb:ngpus=1 #only Remove GPU bit for CPU-only action
+#PBS -l select=1:ncpus=4:mem=16gb:ngpus=1 
 #PBS -j oe
+
+#only Remove GPU bit for CPU-only action
+
 
 # 1) Clean module environment
 module purge
