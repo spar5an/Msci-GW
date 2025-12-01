@@ -64,7 +64,7 @@ If this fails, stop here and paste the error.
 
 ---
 
-# 📁 Step 2 — Confirm venv path explicitly
+# Confirm venv path explicitly
 
 Let’s record the exact absolute path so we can use it in the PBS script:
 
