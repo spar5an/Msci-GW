@@ -111,8 +111,10 @@ class AffineCouplingLayer(nn.Module):
         self.scale_net = nn.Sequential(
             nn.Linear(dim + context_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.0),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.0),
             nn.Linear(hidden_dim, dim),
             nn.Tanh()  # Stabilize training
         )
@@ -120,8 +122,10 @@ class AffineCouplingLayer(nn.Module):
         self.translation_net = nn.Sequential(
             nn.Linear(dim + context_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.0),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.0),
             nn.Linear(hidden_dim, dim)
         )
 
@@ -166,29 +170,122 @@ class EmbeddingNetwork(nn.Module):
     """
     Neural network to embed observed data into context vector.
     Similar to DINGO's data compression network.
+    Supports multi-detector data with multiple processing strategies.
     """
-    def __init__(self, data_dim=100, context_dim=64, hidden_dim=128):
+    def __init__(self, data_dim=100, context_dim=64, hidden_dim=128, num_detectors=1, multi_detector_mode='concatenate'):
         super().__init__()
 
-        self.network = nn.Sequential(
-            nn.Linear(data_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, context_dim)
-        )
+        self.num_detectors = num_detectors
+        self.multi_detector_mode = multi_detector_mode
+        self.data_dim = data_dim
+        self.context_dim = context_dim
+
+        if multi_detector_mode == 'concatenate':
+            # Concatenate all detector data and process together
+            self.network = nn.Sequential(
+                nn.Linear(data_dim * num_detectors, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),  # Dropout layer (rate set by training function)
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),  # Dropout layer (rate set by training function)
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),  # Dropout layer (rate set by training function)
+                nn.Linear(hidden_dim, context_dim)
+            )
+
+        elif multi_detector_mode == 'separate':
+            # Process each detector separately, then combine
+            self.detector_networks = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(data_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(0.0),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(0.0),
+                    nn.Linear(hidden_dim, context_dim // num_detectors)
+                )
+                for _ in range(num_detectors)
+            ])
+
+            # Combine detector embeddings
+            self.combine_network = nn.Sequential(
+                nn.Linear(context_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),
+                nn.Linear(hidden_dim, context_dim)
+            )
+
+        elif multi_detector_mode == 'shared':
+            # Shared network for all detectors, then combine
+            self.shared_network = nn.Sequential(
+                nn.Linear(data_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),
+                nn.Linear(hidden_dim, context_dim // num_detectors)
+            )
+
+            self.combine_network = nn.Sequential(
+                nn.Linear(context_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.0),
+                nn.Linear(hidden_dim, context_dim)
+            )
+        else:
+            raise ValueError(f"Unknown multi_detector_mode: {multi_detector_mode}")
 
     def forward(self, data):
         """
         Args:
-            data: observed data [batch_size, data_dim]
+            data: observed data
+                - If num_detectors == 1: [batch_size, data_dim]
+                - If num_detectors > 1: [batch_size, num_detectors, data_dim]
 
         Returns:
             context: embedded representation [batch_size, context_dim]
         """
-        return self.network(data)
+        if self.num_detectors == 1:
+            # Single detector case
+            if self.multi_detector_mode == 'concatenate':
+                return self.network(data)
+            else:
+                # For consistency with multi-detector modes
+                return self.network(data) if hasattr(self, 'network') else self.shared_network(data)
+
+        # Multi-detector case
+        batch_size = data.shape[0]
+
+        if self.multi_detector_mode == 'concatenate':
+            # Flatten detectors: [batch, num_detectors, data_dim] -> [batch, num_detectors * data_dim]
+            data_flat = data.reshape(batch_size, -1)
+            return self.network(data_flat)
+
+        elif self.multi_detector_mode == 'separate':
+            # Process each detector separately
+            detector_embeddings = []
+            for i in range(self.num_detectors):
+                embedding = self.detector_networks[i](data[:, i, :])
+                detector_embeddings.append(embedding)
+
+            # Concatenate and combine
+            combined = torch.cat(detector_embeddings, dim=1)
+            return self.combine_network(combined)
+
+        elif self.multi_detector_mode == 'shared':
+            # Process each detector with shared weights
+            detector_embeddings = []
+            for i in range(self.num_detectors):
+                embedding = self.shared_network(data[:, i, :])
+                detector_embeddings.append(embedding)
+
+            # Concatenate and combine
+            combined = torch.cat(detector_embeddings, dim=1)
+            return self.combine_network(combined)
 
 ################### Model Classes ###################
 
@@ -363,9 +460,12 @@ class DINGOModel(nn.Module):
 
     Architecture:
     observed_data -> EmbeddingNet -> context -> NormalizingFlow -> log p(params | data)
+
+    Supports multi-detector data with configurable processing strategies.
     """
     def __init__(self, data_dim=100, param_dim=1, context_dim=64,
-                 num_flow_layers=6, hidden_dim=128, config=None):
+                 num_flow_layers=6, hidden_dim=128, num_detectors=1,
+                 multi_detector_mode='concatenate', config=None):
         super().__init__()
 
         # Support both positional args and config dict
@@ -375,6 +475,8 @@ class DINGOModel(nn.Module):
             context_dim = config.get('context_dim', context_dim)
             num_flow_layers = config.get('num_flow_layers', num_flow_layers)
             hidden_dim = config.get('hidden_dim', hidden_dim)
+            num_detectors = config.get('num_detectors', num_detectors)
+            multi_detector_mode = config.get('multi_detector_mode', multi_detector_mode)
 
         # Store config for checkpointing
         self.config = {
@@ -382,13 +484,17 @@ class DINGOModel(nn.Module):
             'param_dim': param_dim,
             'context_dim': context_dim,
             'num_flow_layers': num_flow_layers,
-            'hidden_dim': hidden_dim
+            'hidden_dim': hidden_dim,
+            'num_detectors': num_detectors,
+            'multi_detector_mode': multi_detector_mode
         }
 
         self.embedding_net = EmbeddingNetwork(
             data_dim=data_dim,
             context_dim=context_dim,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
+            num_detectors=num_detectors,
+            multi_detector_mode=multi_detector_mode
         )
 
         self.flow = NormalizingFlow(
@@ -404,7 +510,9 @@ class DINGOModel(nn.Module):
 
         Args:
             params: parameter values [batch_size, param_dim]
-            data: observed data [batch_size, data_dim]
+            data: observed data
+                - Single detector: [batch_size, data_dim]
+                - Multi-detector: [batch_size, num_detectors, data_dim]
 
         Returns:
             log_prob: log p(params | data)
@@ -418,7 +526,9 @@ class DINGOModel(nn.Module):
         Sample from posterior p(params | data)
 
         Args:
-            data: observed data [batch_size, data_dim]
+            data: observed data
+                - Single detector: [batch_size, data_dim]
+                - Multi-detector: [batch_size, num_detectors, data_dim]
             num_samples: number of samples to draw
 
         Returns:
@@ -772,6 +882,64 @@ def load_npe(model_path='best_npe_model.pt', model_class=DINGOModel):
     print(f"  Best validation log prob: {checkpoint['best_val_log_prob']:.4f}")
 
     return model, checkpoint
+
+def create_dingo_from_data(dataloader_result, param_dim=None, context_dim=64,
+                           num_flow_layers=6, hidden_dim=128, multi_detector_mode='concatenate'):
+    """
+    Create a DINGOModel with dimensions automatically inferred from dataloader metadata.
+
+    Args:
+        dataloader_result: Result dict from pycbc_data_generator or load_dataloaders
+        param_dim: Number of parameters to infer. If None, inferred from metadata
+        context_dim: Context dimension. Defaults to 64
+        num_flow_layers: Number of flow layers. Defaults to 6
+        hidden_dim: Hidden dimension. Defaults to 128
+        multi_detector_mode: 'concatenate', 'separate', or 'shared'. Defaults to 'concatenate'
+
+    Returns:
+        DINGOModel: Model configured with correct dimensions
+
+    Examples:
+        >>> data = load_dataloaders('my_data.pt')
+        >>> model = create_dingo_from_data(data, context_dim=128, num_flow_layers=8)
+    """
+    metadata = dataloader_result['metadata']
+
+    # Infer dimensions from metadata
+    if 'waveform_shape' in metadata:
+        # Format: (num_detectors, time_length)
+        num_detectors, data_dim = metadata['waveform_shape']
+    elif 'channels' in metadata and 'target_length' in metadata:
+        num_detectors = len(metadata['channels'])
+        data_dim = metadata['target_length']
+    else:
+        raise ValueError("Cannot infer data dimensions from metadata. Missing 'waveform_shape' or 'channels'/'target_length'")
+
+    if param_dim is None:
+        if 'parameter_names' in metadata:
+            param_dim = len(metadata['parameter_names'])
+        else:
+            raise ValueError("Cannot infer param_dim from metadata. Please specify explicitly.")
+
+    print(f"Creating DINGOModel with inferred dimensions:")
+    print(f"  data_dim (time length per detector): {data_dim}")
+    print(f"  num_detectors: {num_detectors}")
+    print(f"  param_dim: {param_dim}")
+    print(f"  context_dim: {context_dim}")
+    print(f"  num_flow_layers: {num_flow_layers}")
+    print(f"  multi_detector_mode: {multi_detector_mode}")
+
+    model = DINGOModel(
+        data_dim=data_dim,
+        param_dim=param_dim,
+        context_dim=context_dim,
+        num_flow_layers=num_flow_layers,
+        hidden_dim=hidden_dim,
+        num_detectors=num_detectors,
+        multi_detector_mode=multi_detector_mode
+    )
+
+    return model
 
 def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epochs=20, n_trials=None, model_path='best_predictor_model.pt'):
     """
