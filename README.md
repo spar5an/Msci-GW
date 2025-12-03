@@ -14,8 +14,8 @@ TODO:
 
 - Update to pycbc noise
 
-
+- not convinced multithreading is working, test?
+- probably worth refractoring this into jhpy, but i currently dont have time
 - Data pre-processing
-- Dropout + Batch Normalisation
 - Transforms -> Neural Spine Flow? Might be worth checking for others
 - Hyper parameter search for best transforms/context layers, CNN, LSTM etc
