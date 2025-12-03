@@ -1,8 +1,4 @@
-
-# ================================================================================
-# ## 1. Setup and Imports
-# ================================================================================
-
+#11:24
 
 import torch
 import torch.nn as nn
@@ -13,17 +9,18 @@ from scipy import stats
 import math
 import time
 from multiprocessing import Pool
+import data_generator
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
 
-print("✓ Libraries imported successfully")
+print("Libraries imported successfully")
 print(f"PyTorch version: {torch.__version__}")
 
 # GPU/Device configuration
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"✓ Device: {DEVICE}")
+print(f"Device: {DEVICE}")
 if torch.cuda.is_available():
     print(f"  GPU: {torch.cuda.get_device_name(0)}")
     print(f"  GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
@@ -97,18 +94,11 @@ def clear_memory(verbose=True):
             gpu_freed = gpu_before - gpu_after
             print(f"  GPU Freed: {gpu_freed:.2f} GB")
 
-print("✓ Memory utilities loaded")
-
 
 # ================================================================================
 # ## Normalizing Flow Components
 # 
 # DINGO uses **normalizing flows** to transform a simple base distribution (e.g., Gaussian) into a complex posterior distribution.
-# 
-# We'll implement:
-# 1. **Coupling layers** - Core flow transformation
-# 2. **Base distribution** - Standard Gaussian
-# 3. **Flow composition** - Stack multiple transformations
 # ================================================================================
 
 
@@ -118,11 +108,6 @@ class AffineCouplingLayer(nn.Module):
     
     Splits input, transforms one half conditioned on the other:
     x2_new = x2 * exp(s(x1, context)) + t(x1, context)
-    
-    Improvements:
-    - Batch normalization for stable training
-    - Residual connections for better gradient flow
-    - Larger hidden dimensions for complex transformations
     """
     def __init__(self, dim, context_dim, hidden_dim=128, mask_type='half'):
         super().__init__()
@@ -148,7 +133,7 @@ class AffineCouplingLayer(nn.Module):
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, dim),
-            nn.Tanh()
+            nn.Tanh()  # Bounded to [-1, 1] for numerical stability
         )
         
         # Translation network - learns additive transformation
@@ -186,6 +171,8 @@ class AffineCouplingLayer(nn.Module):
         s = self.scale_net(scale_input)
         t = self.translation_net(translation_input)
         
+        # s is in [-1, 1] from Tanh, exp(s) in [0.368, 2.718]
+        # This provides controlled scale expansion for numerical stability
         s = s * (1 - self.mask)
         t = t * (1 - self.mask)
         
@@ -281,14 +268,6 @@ class NormalizingFlow(nn.Module):   # Just the normalising flow class.
 
 print("✓ Normalizing flow defined")
 
-
-# ================================================================================
-# ## 4. Embedding Network
-# 
-# DINGO uses an embedding network to compress raw data into a lower-dimensional representation ("context") that conditions the flow.
-# ================================================================================
-
-
 class EmbeddingNetwork(nn.Module):  # All this class does is take a data vector of length 100 (the noisy sine wave) and compress it into a context vector of length 64
     """
     Neural network to embed observed data into context vector
@@ -319,12 +298,144 @@ class EmbeddingNetwork(nn.Module):  # All this class does is take a data vector 
 
 print("✓ Embedding network defined")
 
+class Conv1DEmbeddingNetwork(nn.Module):
 
-# ================================================================================
-# ## 5. Complete DINGO-style Model
-# 
-# Combines embedding network + normalizing flow
-# ================================================================================
+    def __init__(self, data_dim=5868, context_dim=512, num_filters=[64, 128, 256]):
+        super().__init__()
+        self.data_dim = data_dim
+        self.context_dim = context_dim
+        
+        # Conv layers with batch norm and ReLU
+        self.conv1 = nn.Sequential(
+            nn.Conv1d(1, num_filters[0], kernel_size=15, stride=2, padding=7),
+            nn.BatchNorm1d(num_filters[0]),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        self.conv2 = nn.Sequential(
+            nn.Conv1d(num_filters[0], num_filters[1], kernel_size=15, stride=2, padding=7),
+            nn.BatchNorm1d(num_filters[1]),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        self.conv3 = nn.Sequential(
+            nn.Conv1d(num_filters[1], num_filters[2], kernel_size=15, stride=2, padding=7),
+            nn.BatchNorm1d(num_filters[2]),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2)
+        )
+        
+        # Global average pooling (adaptive to handle variable sizes)
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Final dense layer
+        self.fc = nn.Sequential(
+            nn.Linear(num_filters[2], 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, context_dim),
+            nn.LayerNorm(context_dim)
+        )
+    
+    def forward(self, data):
+        """
+        Args:
+            data: observed waveform [batch_size, data_dim]
+        
+        Returns:
+            context: embedded representation [batch_size, context_dim]
+        """
+        # Reshape to add channel dimension: (batch, 1, data_dim)
+        x = data.unsqueeze(1)
+        
+        # Apply conv layers
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        
+        # Global average pooling: (batch, channels, 1)
+        x = self.global_pool(x)
+        
+        # Flatten: (batch, channels)
+        x = x.view(x.size(0), -1)
+        
+        # Final dense layer to context
+        context = self.fc(x)
+        
+        return context
+
+
+class LSTMEmbeddingNetwork(nn.Module):
+    """
+    LSTM-based embedding network for waveform data
+    
+    Better at capturing temporal dependencies in waveforms
+    """
+    def __init__(self, data_dim=7241, context_dim=512, hidden_dim=256, num_layers=2):
+        super().__init__()
+        self.data_dim = data_dim
+        self.context_dim = context_dim
+        self.hidden_dim = hidden_dim
+        
+        # Initial projection to embed scalar values
+        self.input_proj = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.ReLU()
+        )
+        
+        # LSTM layers
+        self.lstm = nn.LSTM(
+            input_size=32,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1 if num_layers > 1 else 0
+        )
+        
+        # Output projection
+        self.output_proj = nn.Sequential(
+            nn.Linear(hidden_dim * 2, 512),  # *2 for bidirectional
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, context_dim),
+            nn.LayerNorm(context_dim)
+        )
+    
+    def forward(self, data):
+        """
+        Args:
+            data: observed waveform [batch_size, data_dim]
+        
+        Returns:
+            context: embedded representation [batch_size, context_dim]
+        """
+        batch_size = data.size(0)
+        
+        # Reshape to (batch_size, data_dim, 1) for input_proj
+        x = data.unsqueeze(-1)  # [batch, data_dim, 1]
+        
+        # Project each time point: [batch, data_dim, 32]
+        x = self.input_proj(x)
+        
+        # LSTM expects (batch, seq_len, features)
+        # x is already (batch, data_dim, 32) which is correct
+        lstm_out, (h_n, c_n) = self.lstm(x)  # lstm_out: [batch, data_dim, hidden_dim*2]
+        
+        # Use final hidden state from both directions
+        h_forward = h_n[-2, :, :]  # [batch, hidden_dim]
+        h_backward = h_n[-1, :, :]  # [batch, hidden_dim]
+        final_state = torch.cat([h_forward, h_backward], dim=1)  # [batch, hidden_dim*2]
+        
+        # Project to context dimension
+        context = self.output_proj(final_state)
+        
+        return context
 
 
 class DINGOModel(nn.Module):
@@ -341,20 +452,38 @@ class DINGOModel(nn.Module):
     - GPU support for accelerated training
     """
     def __init__(self, data_dim=100, param_dim=1, context_dim=64, 
-                 num_flow_layers=6, hidden_dim=128, device=None):
+                 num_flow_layers=6, hidden_dim=128, device=None, use_conv1d=False, use_lstm=False):
         super().__init__()
-        # Use 2 parallel branches to capture different signal characteristics
-        self.embedding_net = nn.Sequential(
-            nn.Linear(data_dim, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, hidden_dim * 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim * 2, context_dim)
-        )
+        
+        # Choose embedding architecture
+        if use_lstm and data_dim > 1000:
+            # Use LSTM for large sequential data
+            self.embedding_net = LSTMEmbeddingNetwork(
+                data_dim=data_dim,
+                context_dim=context_dim,
+                hidden_dim=256,
+                num_layers=2
+            )
+        elif use_conv1d and data_dim > 1000:
+            # Use Conv1D for large data
+            self.embedding_net = Conv1DEmbeddingNetwork(
+                data_dim=data_dim,
+                context_dim=context_dim,
+                num_filters=[64, 128, 256]
+            )
+        else:
+            # Use fully-connected for small data
+            self.embedding_net = nn.Sequential(
+                nn.Linear(data_dim, hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim * 2, hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim * 2, hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim * 2, hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim * 2, context_dim)
+            )
         
         self.flow = NormalizingFlow(
             param_dim=param_dim,
@@ -395,17 +524,6 @@ class DINGOModel(nn.Module):
             samples = self.flow.sample(context, num_samples=num_samples)
         return samples
 
-# Create improved model with more capacity
-model = DINGOModel(
-    data_dim=1000,
-    param_dim=5,
-    context_dim=256,          # INCREASED: from 128 to 256 (more capacity)
-    num_flow_layers=16,       # INCREASED: from 10 to 16 (deeper flow)
-    hidden_dim=512            # INCREASED: from 256 to 512 (larger networks)
-)
-
-print(f"  Normalizing flow: {sum(p.numel() for p in model.flow.parameters()):,} parameters")
-
 def train_dingo_model(model, train_amplitudes_and_phases, train_data, 
                       num_epochs=100, batch_size=256, lr=3e-4, use_mixed_precision=True):
     """
@@ -425,15 +543,12 @@ def train_dingo_model(model, train_amplitudes_and_phases, train_data,
     )
     
     # Mixed precision training scaler (for GPU)
-    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() and use_mixed_precision else None
+    scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() and use_mixed_precision else None
     
     # OPTIMIZATION: Enable cudnn auto-tuner for faster operations
     torch.backends.cudnn.benchmark = True
     
     num_simulations = len(train_amplitudes_and_phases)
-    
-    # Enable cudnn auto-tuner for faster training
-    torch.backends.cudnn.benchmark = True
     
     print(f"Training improved DINGO-style model for {num_epochs} epochs...\n")
     
@@ -502,7 +617,116 @@ def train_dingo_model(model, train_amplitudes_and_phases, train_data,
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Epoch {epoch+1}/{num_epochs}, Avg Log Prob: {avg_log_prob:.4f}, Best: {best_loss:.4f}, LR: {current_lr:.2e}")
     
-    print("\n✓ Training complete!")
+    print("\n Training complete!")
+    return losses
+
+def train_dingo_model_pycbc(model, train_params, train_data, 
+                             num_epochs=100, batch_size=256, lr=1e-4, use_mixed_precision=True):
+    # Move model and data to device
+    model = model.to(DEVICE)
+    train_params = train_params.to(DEVICE)
+    train_data = train_data.to(DEVICE)
+    
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=num_epochs, eta_min=lr * 0.01
+    )
+    
+    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() and use_mixed_precision else None
+    torch.backends.cudnn.benchmark = True
+    
+    num_samples = len(train_params)
+    print(f"\nTraining PyCBC DINGO model for {num_epochs} epochs...")
+    print(f"  Samples: {num_samples}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Learning rate: {lr}\n")
+    
+    losses = []
+    best_loss = -float('inf')
+    patience_counter = 0
+    patience = 20
+    
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = 0
+        num_batches = 0
+        batch_losses = []
+        
+        # Shuffle indices
+        indices = torch.randperm(num_samples, device=DEVICE)
+        
+        for i in range(0, num_samples, batch_size):
+            batch_indices = indices[i:min(i + batch_size, num_samples)]
+            batch_params = train_params[batch_indices]
+            batch_data = train_data[batch_indices]
+            
+            optimizer.zero_grad()
+            
+            if scaler is not None:
+                # Mixed precision training
+                with torch.cuda.amp.autocast():
+                    log_prob = model(batch_params, batch_data)
+                    loss = -log_prob.mean()
+                    
+                    # Get embedding for regularization
+                    context = model.embedding_net(batch_data)
+                    # Regularize: context should have non-zero variance across batch
+                    # This forces embedding to use the input data
+                    context_std = context.std(dim=0).mean()
+                    reg_loss = 10.0 * torch.clamp(1.5 - context_std, min=0)  # Target context_std > 1.5
+                    
+                    total_loss = loss + reg_loss
+                
+                scaler.scale(total_loss).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard training
+                log_prob = model(batch_params, batch_data)
+                loss = -log_prob.mean()
+                
+                # Embedding regularization - force context variance
+                context = model.embedding_net(batch_data)
+                context_std = context.std(dim=0).mean()
+                reg_loss = 10.0 * torch.clamp(1.5 - context_std, min=0)  # Target context_std > 1.5
+                total_loss = loss + reg_loss
+                
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            
+            epoch_loss += -loss.item()
+            batch_losses.append(-loss.item())
+            num_batches += 1
+        
+        avg_log_prob = epoch_loss / num_batches
+        losses.append(avg_log_prob)
+        
+        # Monitor context variance on last batch
+        with torch.no_grad():
+            context_check = model.embedding_net(batch_data)
+            context_std_check = context_check.std(dim=0).mean().item()
+        
+        scheduler.step()
+        
+        if avg_log_prob > best_loss:
+            best_loss = avg_log_prob
+        #    patience_counter = 0
+        #else:
+        #    patience_counter += 1
+        
+        if (epoch + 1) % 10 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            batch_std = np.std(batch_losses)
+            print(f"Epoch {epoch+1:3d}/{num_epochs}, Avg Log Prob: {avg_log_prob:7.4f}, Best: {best_loss:7.4f}, Std: {batch_std:6.4f}, Context_std: {context_std_check:6.4f}, LR: {current_lr:.2e}, Patience: {patience_counter}/{patience}")
+        
+        # Early stopping
+        #if patience_counter >= patience:
+        #    print(f"\n⚠ Early stopping at epoch {epoch+1} (no improvement for {patience} epochs)")
+        #    break
+    
+    print("\n LSTM-based training complete!")
     return losses
 
 def infer_with_dingo(model, observed_data, num_samples=5000):
@@ -515,18 +739,39 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
         num_samples: number of posterior samples
     
     Returns:
-        samples: posterior samples [num_samples, param_dim]
+        samples: posterior samples [num_samples, param_dim] in physical parameter space
         statistics: dict with mean, median, std, quantiles
     """
     model.eval()
     
-    # Prepare data on device
-    data_tensor = torch.FloatTensor(observed_data).unsqueeze(0).to(DEVICE)  # [1, data_dim]
+    # Prepare data on device - convert to tensor if needed
+    if isinstance(observed_data, np.ndarray):
+        data_tensor = torch.FloatTensor(observed_data)
+    else:
+        data_tensor = observed_data
+    
+    # Add batch dimension: (data_dim,) -> (1, data_dim)
+    if data_tensor.dim() == 1:
+        data_tensor = data_tensor.unsqueeze(0)
+    
+    data_tensor = data_tensor.to(DEVICE)
     
     # Sample from posterior
     with torch.no_grad():
         samples = model.sample_posterior(data_tensor, num_samples=num_samples)
-        samples = samples.numpy()  # [num_samples, param_dim]
+        samples = samples.cpu().numpy()  # [num_samples, param_dim]
+    
+    # Apply inverse normalization to convert from [-1, 1] back to physical parameter space
+    # Use PHYSICAL BOUNDS (not data-dependent) for inference generalization
+    mass_min, mass_max = 1.0, 100.0
+    spin_min, spin_max = -1.0, 1.0
+    
+    samples_physical = samples.copy()
+    samples_physical[:, 0] = (samples[:, 0] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass1
+    samples_physical[:, 1] = (samples[:, 1] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass2
+    samples_physical[:, 2] = (samples[:, 2] + 1) / 2 * (spin_max - spin_min) + spin_min  # spin
+    
+    samples = samples_physical
     
     # For 1D parameters, flatten; for multi-D, keep as is
     if samples.shape[1] == 1:
@@ -851,14 +1096,55 @@ def simulate_variable_multifreq_decaying_inspiral_merger_sine_wave(amp=1.0, phas
 
 
 
+def prepare_pycbc_data():
+    config = {
+        'mass1': lambda size: np.random.uniform(10, 50, size=size),
+        'mass2': lambda size: np.random.uniform(10, 50, size=size),
+        'spin1z': lambda size: np.random.uniform(-0.5, 0.5, size=size),
+    }
 
+    # Generate with H1 and L1 projection (default detectors)
+    result = data_generator.pycbc_data_generator(
+        config, 
+        num_samples=100000, 
+        batch_size=16, 
+        num_workers=4,
+        allow_padding=True
+    )
 
+    # Access the loaders
+    train_loader = result['train_loader']
+    val_loader = result['val_loader']
+    test_loader = result['test_loader']
 
+    data = []
+    params = []
+    for waveforms, batch_params in train_loader:
+        train_params = torch.FloatTensor(batch_params)
+        train_data = torch.FloatTensor(waveforms)
+        # Extract only H1 channel (index 0) and flatten
+        h1_data = train_data[:, 0, :].reshape(train_data.shape[0], -1)
+        data.append(h1_data)
+        params.append(train_params)
+    all_data = torch.cat(data, dim=0)
+    all_params = torch.cat(params, dim=0)
 
+    data_test = []
+    params_test = []
+    for waveforms, batch_params in test_loader:
+        test_params = torch.FloatTensor(batch_params)
+        test_data = torch.FloatTensor(waveforms)
+        # Extract only H1 channel (index 0) and flatten
+        h1_data = test_data[:, 0, :].reshape(test_data.shape[0], -1)
+        data_test.append(h1_data)
+        params_test.append(test_params)
+    all_test_data = torch.cat(data_test, dim=0)
+    all_test_params = torch.cat(params_test, dim=0)
 
+    return all_data, all_params, all_test_data, all_test_params
 
-num_arrays = 100000 # How many samples
-length = 5 # Maximum number of modes
+#num_arrays = 100000 # How many samples
+#length = 5 # Maximum number of modes
 
 '''
 non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=length)
@@ -915,34 +1201,50 @@ def prepare_for_training(frequencies_array, train_data):
     return train_params, train_data
 
 # Generate frequency arrays for training
-non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=length)
-Frequencies_array = zeroer(non_zeroed_frequencies_array, length, num_arrays)
+#non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=length)
+#Frequencies_array = zeroer(non_zeroed_frequencies_array, length, num_arrays)
 
 print("\nGenerating observed data for all frequency arrays...")
-observed_variable_multifreq_dataset = generate_observed_data_dataset(Frequencies_array)
-variable_train_params, variable_train_data = prepare_for_training(Frequencies_array, observed_variable_multifreq_dataset)
+#observed_variable_multifreq_dataset = generate_observed_data_dataset(Frequencies_array)
+#variable_train_params, variable_train_data = prepare_for_training(Frequencies_array, observed_variable_multifreq_dataset)
 
-print(f"  Ready for training with {len(variable_train_params)} variable-mode samples")
+pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params = prepare_pycbc_data()
+
+#print(f"  Ready for training with {len(variable_train_params)} variable-mode samples")
 
 
+
+
+# Apply fixed-domain parameter normalisation
+mass_min, mass_max = 1.0, 100.0      # Physical GW mass range [M_sun]
+spin_min, spin_max = -1.0, 1.0       # Spin always in [-1, 1]
+
+pycbc_params_normalized = pycbc_params.clone()
+pycbc_params_normalized[:, 0] = 2 * (pycbc_params[:, 0] - mass_min) / (mass_max - mass_min) - 1  # mass1
+pycbc_params_normalized[:, 1] = 2 * (pycbc_params[:, 1] - mass_min) / (mass_max - mass_min) - 1  # mass2
+pycbc_params_normalized[:, 2] = 2 * (pycbc_params[:, 2] - spin_min) / (spin_max - spin_min) - 1  # spin
+
+# Train DINGO model on PyCBC data
 model = DINGOModel(
-    data_dim=1000,
-    param_dim=5,
-    context_dim=512,          # Increased: 256 → 512 (more embedding capacity for spectral detail)
-    num_flow_layers=16,       # Increased: 13 → 16 (more transformation power for 5-mode coupling)
-    hidden_dim=384,           # Increased: 256 → 384 (wider coupling layers for frequency separation)
-    device=DEVICE
+    data_dim=pycbc_data.shape[1],
+    param_dim=3,
+    context_dim=2048,         # Increased for richer feature extraction
+    num_flow_layers=20,        # Increase depth for better posterior approximation
+    hidden_dim=512,          
+    device=DEVICE,
+    use_conv1d=False,
+    use_lstm=True             # Set to True to use LSTM embedding instead of Conv1D
 )
 
-print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}\n")
-
-losses = train_dingo_model(
+print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+print("Training with embedding regularization (weight=10.0, target context_std > 1.5)\n")
+losses = train_dingo_model_pycbc(
     model, 
-    variable_train_params, 
-    variable_train_data, 
-    num_epochs=500,           # Increased: 400 → 500 (give model more time to master 5-mode patterns)
-    batch_size=512,           # Decreased: 1024 → 512 (more gradient updates per epoch = better convergence)
-    lr=5e-4                   # Increased: 3e-4 → 5e-4 (faster initial learning)
+    pycbc_params_normalized, 
+    pycbc_data, 
+    num_epochs=55,          # More epochs for better convergence
+    batch_size=256,           
+    lr=5e-5                  # Lower LR for 20-layer flow
 )
 
 #Traning Progress
@@ -1074,10 +1376,12 @@ plt.show()
 
 '''
 
+
+
 # ================================================================================
 # FOR VIEWING FREQUENCY ONLY TESTS
 # ================================================================================
-
+'''
 
 print("="*80)
 print("TESTING VARIABLE-MODE FREQUENCY INFERENCE (1-5 Modes)")
@@ -1203,3 +1507,114 @@ for test_idx, test_case in enumerate(test_cases):
 
 plt.tight_layout()
 plt.savefig("Variable_Mode_Frequency_Inference_Tests.png")
+'''
+
+# ================================================================================
+# TESTING PYCBC DATA INFERENCE (Similar to DINGO frequency tests)
+# ================================================================================
+
+print("\n" + "=" * 80)
+print("TESTING PYCBC PARAMETER INFERENCE")
+print("=" * 80)
+
+# Create test cases with different mass combinations
+
+
+print("\nTesting PyCBC parameter inference with 2D posterior histograms:\n")
+
+# Select 3 test samples from pycbc_test_data and pycbc_test_params
+num_test_samples = min(3, len(pycbc_test_data))
+test_indices = np.linspace(0, len(pycbc_test_data) - 1, num_test_samples, dtype=int)
+
+# Collect all posteriors first to plot 1D marginals
+all_posteriors = []
+test_true_params = []
+
+for test_idx in test_indices:
+    observed_data = pycbc_test_data[test_idx].numpy()
+    true_params = pycbc_test_params[test_idx].numpy()
+    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=2000)
+    all_posteriors.append(posterior_samples)
+    test_true_params.append(true_params)
+
+# Create figure with 1D marginals on top row, 2D posteriors below for each test sample
+# Layout: 1 row for 1D histograms + 3 rows per test sample for 2D histograms
+num_rows = 1 + 3 * num_test_samples
+fig, axes = plt.subplots(num_rows, 3, figsize=(15, 5 + 5*num_test_samples))
+
+# Row 0: Plot 1D marginal histograms (outside loop, overlay all samples)
+param_names = ['mass1', 'mass2', 'spin1z']
+colors = ['blue', 'orange', 'purple']
+
+for param_idx in range(3):
+    ax = axes[0, param_idx]
+    
+    # Overlay histograms from all test samples
+    for sample_idx, posterior in enumerate(all_posteriors):
+        alpha = 0.4 + 0.2 * sample_idx  # Vary transparency
+        ax.hist(posterior[:, param_idx], bins=40, alpha=alpha, color=colors[param_idx], 
+                edgecolor='black', linewidth=0.5, label=f'Sample {sample_idx+1}')
+    
+    ax.set_xlabel(f'{param_names[param_idx]} (M_sun)' if param_idx < 2 else 'spin1z', fontsize=11)
+    ax.set_ylabel('Counts', fontsize=11)
+    ax.set_title(f'1D Marginal Posterior: {param_names[param_idx]}', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+# Rows 1+: Plot 2D posteriors for each test sample (inside loop)
+for plot_idx, test_idx in enumerate(test_indices):
+    true_params = test_true_params[plot_idx]
+    posterior_samples = all_posteriors[plot_idx]
+    
+    print(f"\n{'='*60}")
+    print(f"Test {plot_idx+1} (sample {test_idx}): PyCBC Binary Inference")
+    print(f"True Parameters:")
+    print(f"  mass1: {true_params[0]:.2f} M_sun")
+    print(f"  mass2: {true_params[1]:.2f} M_sun")
+    print(f"  spin1z: {true_params[2]:.2f}")
+    print(f"{'='*60}")
+    
+    print(f"\n  Posterior Statistics:")
+    for param_idx in range(3):
+        param_samples = posterior_samples[:, param_idx]
+        true_val = true_params[param_idx]
+        inferred_mean = np.mean(param_samples)
+        inferred_std = np.std(param_samples)
+        error = abs(inferred_mean - true_val)
+        print(f"    {param_names[param_idx]:8s}: True={true_val:6.2f}, Inferred={inferred_mean:6.2f}±{inferred_std:5.2f}, Error={error:6.4f}")
+    
+    # Row offset for this sample's 2D histograms
+    row_offset = 1 + 3 * plot_idx
+    
+    # 2D Histogram: mass1 vs mass2
+    ax = axes[row_offset, 0]
+    h = ax.hist2d(posterior_samples[:, 0], posterior_samples[:, 1], bins=40, cmap='plasma')
+    ax.plot(true_params[0], true_params[1], 'r*', markersize=20, label='True values', markeredgecolor='white', markeredgewidth=1)
+    ax.set_xlabel('mass1 (M_sun)', fontsize=11)
+    ax.set_ylabel('mass2 (M_sun)', fontsize=11)
+    ax.set_title(f'Sample {test_idx}: mass1 vs mass2', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    plt.colorbar(h[3], ax=ax, label='Counts')
+    
+    # 2D Histogram: mass1 vs spin1z
+    ax = axes[row_offset, 1]
+    h = ax.hist2d(posterior_samples[:, 0], posterior_samples[:, 2], bins=40, cmap='plasma')
+    ax.plot(true_params[0], true_params[2], 'r*', markersize=20, label='True values', markeredgecolor='white', markeredgewidth=1)
+    ax.set_xlabel('mass1 (M_sun)', fontsize=11)
+    ax.set_ylabel('spin1z', fontsize=11)
+    ax.set_title(f'Sample {test_idx}: mass1 vs spin1z', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    plt.colorbar(h[3], ax=ax, label='Counts')
+    
+    # 2D Histogram: mass2 vs spin1z
+    ax = axes[row_offset, 2]
+    h = ax.hist2d(posterior_samples[:, 1], posterior_samples[:, 2], bins=40, cmap='plasma')
+    ax.plot(true_params[1], true_params[2], 'r*', markersize=20, label='True values', markeredgecolor='white', markeredgewidth=1)
+    ax.set_xlabel('mass2 (M_sun)', fontsize=11)
+    ax.set_ylabel('spin1z', fontsize=11)
+    ax.set_title(f'Sample {test_idx}: mass2 vs spin1z', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=10)
+    plt.colorbar(h[3], ax=ax, label='Counts')
+
+plt.tight_layout()
+plt.savefig("PyCBC_Parameter_Inference_Tests.png", dpi=150)
