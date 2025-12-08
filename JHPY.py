@@ -12,6 +12,15 @@ import itertools
 import random
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from tqdm import tqdm
+from typing import Dict, List, Callable
+from functools import partial
+from multiprocessing import Pool
+from pycbc.waveform import get_td_waveform
+from pycbc.detector import Detector
+from pycbc.psd import aLIGOZeroDetHighPower
+from pycbc.noise import noise_from_psd
+from pycbc.types import TimeSeries
+
 
 ################### Miscellaneous functions ###################
 
@@ -86,7 +95,527 @@ def generate_sine_data(num_simulations=10000, freq_low=0.5, freq_high=5.0, phase
     return {"Amplitudes": amplitudes, "Phases": phases, "Frequencies":frequencies,
             "Train_Loader": train_loader, "Test_Loader": test_loader, "Val_Loader": val_loader}
 
+def _validate_config(config: Dict[str, Callable]) -> None:
+    """Validate configuration dictionary."""
+    if not isinstance(config, dict):
+        raise TypeError("config must be a dictionary")
+    
+    if not config:
+        raise ValueError("config cannot be empty")
+    
+    for key, value in config.items():
+        if not callable(value):
+            raise TypeError(f"config['{key}'] must be callable (e.g., a distribution function)")
+        
+        try:
+            test = value(size=2)
+            if not isinstance(test, np.ndarray):
+                raise TypeError(f"config['{key}']() must return numpy array")
+        except Exception as e:
+            raise ValueError(f"config['{key}'] failed test call: {e}")
 
+
+def _generate_parameter_sets(config: Dict[str, Callable], num_samples: int) -> List[Dict]:
+    """Generate all parameter combinations upfront."""
+    param_arrays = {}
+    for param_name, dist_func in config.items():
+        param_arrays[param_name] = dist_func(size=num_samples)
+    
+    param_dicts = []
+    for i in range(num_samples):
+        param_dict = {name: float(values[i]) for name, values in param_arrays.items()}
+        param_dicts.append(param_dict)
+    
+    return param_dicts
+
+
+def _generate_single_waveform(params: Dict, time_resolution: float, approximant: str,
+                              f_lower: float, detectors: List[str]) -> Dict:
+    """Worker function to generate a single waveform and project to detectors."""
+    try:
+        hp, hc = get_td_waveform(
+            approximant=approximant,
+            mass1=params['mass1'],
+            mass2=params['mass2'],
+            spin1z=params.get('spin1z', 0.0),
+            spin2z=params.get('spin2z', 0.0),
+            inclination=params.get('inclination', 0.0),
+            coa_phase=params.get('coa_phase', 0.0),
+            distance=params.get('distance', 410.0),  # Luminosity distance in Mpc, default 410 Mpc (GW150914)
+            delta_t=time_resolution,
+            f_lower=f_lower
+        )
+        
+        # Get sky location parameters (defaults to north pole and zero polarization)
+        ra = params.get('ra', 0.0)
+        dec = params.get('dec', np.pi/2)  # North pole
+        polarization = params.get('polarization', 0.0)
+        
+        # Project to detectors
+        detector_signals = {}
+        for det_name in detectors:
+            detector = Detector(det_name)
+            signal = detector.project_wave(hp, hc, ra, dec, polarization, method='lal')
+            detector_signals[det_name] = signal
+            
+        # Add noise
+        for det_name in detectors:
+            signal = detector_signals[det_name]
+
+            # Calculate PSD parameters correctly
+            delta_t = signal.delta_t
+            duration = len(signal) * delta_t
+            delta_f = 1.0 / duration
+            flen = int(duration / delta_t / 2) + 1
+
+            # Create PSD with correct delta_f (frequency resolution, NOT delta_t)
+            psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
+
+            # Verify compatibility: delta_t and psd.delta_f must satisfy length = int(1 / delta_t / psd.delta_f)
+            expected_length = int(1.0 / delta_t / psd.delta_f)
+
+            # Generate noise at exactly the expected_length
+            noise = noise_from_psd(expected_length, delta_t, psd)
+
+            # Adjust signal and noise to match lengths WITHOUT padding
+            # Use the minimum length to avoid zero-padding artifacts
+            min_length = min(len(signal), len(noise))
+
+            # Truncate both to minimum length (keep end where merger is)
+            if len(signal) > min_length:
+                signal = signal[len(signal) - min_length:]
+            if len(noise) > min_length:
+                noise = noise[len(noise) - min_length:]
+
+            # Set noise epoch to match signal epoch (align time series)
+            noise._epoch = signal._epoch
+
+            # Inject noise into signal (both now have same length, no padding)
+            detector_signals[det_name] = signal.inject(noise)
+            
+
+        
+        result = {
+            'success': True,
+            'detectors': detector_signals,
+            'params': params
+        }
+        
+        return result
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'params': params}
+
+
+def _generate_waveforms_parallel(param_dicts: List[Dict],
+                                time_resolution: float,
+                                approximant: str,
+                                f_lower: float,
+                                num_workers: int,
+                                show_progress: bool,
+                                detectors: List[str]) -> List[Dict]:
+    """Generate waveforms in parallel using multiprocessing."""
+    worker_func = partial(_generate_single_waveform,
+                          time_resolution=time_resolution,
+                          approximant=approximant,
+                          f_lower=f_lower,
+                          detectors=detectors)
+    
+    with Pool(processes=num_workers) as pool:
+        if show_progress:
+            results = list(tqdm(
+                pool.imap_unordered(worker_func, param_dicts, chunksize=100),
+                total=len(param_dicts),
+                desc="Generating waveforms"
+            ))
+        else:
+            results = list(pool.imap_unordered(worker_func, param_dicts, chunksize=100))
+    
+    return results
+
+
+def pycbc_data_generator(config: Dict[str, Callable],
+                        num_samples: int,
+                        time_resolution: float = 1/4096,
+                        approximant: str = 'IMRPhenomXP',
+                        f_lower: float = 40.0,
+                        num_workers: int = None,
+                        batch_size: int = 256,
+                        chunk_size: int = 10000,
+                        target_length: int = None,
+                        allow_padding: bool = False,
+                        train_split: float = 0.8,
+                        val_split: float = 0.1,
+                        show_progress: bool = True,
+                        detectors: List[str] = None) -> Dict:
+    """
+    Generate PyCBC waveforms projected to detectors.
+    Returns PyTorch DataLoaders for training, validation, and testing.
+    
+    Parameters
+    ----------
+    config : dict
+        Dictionary mapping parameter names to numpy distribution functions.
+        
+        Required parameters:
+        - 'mass1': Primary mass (solar masses)
+        - 'mass2': Secondary mass (solar masses)
+        
+        Optional parameters:
+        - 'distance': Luminosity distance in Mpc - default: 410.0 (GW150914)
+        - 'spin1z', 'spin2z': Spin components - default: 0.0
+        - 'inclination', 'coa_phase': Orientation angles - default: 0.0
+        - 'ra': Right ascension (radians) - default: 0.0
+        - 'dec': Declination (radians) - default: π/2 (north pole)
+        - 'polarization': Polarization angle (radians) - default: 0.0
+        - 'tc': Coalescence time - default: 0.0
+        
+    num_samples : int
+        Total number of waveforms to generate
+    time_resolution : float
+        Time step (delta_t). Default: 1/4096
+    approximant : str
+        Waveform approximant. Default: 'IMRPhenomXP'
+    f_lower : float
+        Lower frequency cutoff (Hz). Default: 40.0
+    num_workers : int
+        Parallel processes. Default: min(cpu_count(), 8)
+    batch_size : int
+        DataLoader batch size. Default: 256
+    chunk_size : int
+        Process in chunks for memory. Default: 10000
+    target_length : int
+        Target length for padding/truncation. If None, uses max length.
+        Only used if allow_padding=True.
+    allow_padding : bool
+        Allow zero-padding of waveforms to common length. Default: False.
+        If False and waveforms have different lengths, raises ValueError.
+        If True, pads shorter waveforms with zeros at the beginning.
+    train_split : float
+        Training fraction. Default: 0.8
+    val_split : float
+        Validation fraction. Default: 0.1
+    detectors : list of str
+        Detector names. Default: ['H1', 'L1']
+    
+    Returns
+    -------
+    dict with 'train_loader', 'val_loader', 'test_loader', 'metadata'
+        
+    Notes
+    -----
+    If ra, dec, or polarization are not provided in config, they default to:
+    - ra = 0.0
+    - dec = π/2 (north pole)
+    - polarization = 0.0
+    """
+    # Validate inputs
+    _validate_config(config)
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive")
+    if not 0 < train_split < 1 or not 0 < val_split < 1:
+        raise ValueError("train_split and val_split must be between 0 and 1")
+    if train_split + val_split >= 1:
+        raise ValueError("train_split + val_split must be < 1")
+    
+    if num_workers is None:
+        num_workers = 1
+    
+    # Set default detectors
+    if detectors is None:
+        detectors = ['H1', 'L1']
+    
+    # Check which sky parameters are provided
+    sky_params_provided = {
+        'ra': 'ra' in config,
+        'dec': 'dec' in config,
+        'polarization': 'polarization' in config
+    }
+    
+    if any(sky_params_provided.values()):
+        print(f"Generating {num_samples} waveforms with projection to {detectors}")
+        print(f"  Sky parameters: ra={'provided' if sky_params_provided['ra'] else 'default (0.0)'}, "
+              f"dec={'provided' if sky_params_provided['dec'] else 'default (π/2)'}, "
+              f"psi={'provided' if sky_params_provided['polarization'] else 'default (0.0)'}")
+    else:
+        print(f"Generating {num_samples} waveforms with projection to {detectors}")
+        print(f"  Using default sky location: ra=0.0, dec=π/2 (north pole), psi=0.0")
+    
+    # Generate all parameters upfront
+    param_dicts = _generate_parameter_sets(config, num_samples)
+    
+    # Process in chunks for memory efficiency
+    all_successful = []
+    all_failed = []
+    num_chunks = (num_samples + chunk_size - 1) // chunk_size
+    
+    for chunk_idx in range(num_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = min(chunk_start + chunk_size, num_samples)
+        chunk_params = param_dicts[chunk_start:chunk_end]
+        
+        if num_chunks > 1:
+            print(f"\nChunk {chunk_idx + 1}/{num_chunks} ({len(chunk_params)} waveforms)...")
+        
+        # Generate waveforms with detector projection
+        chunk_results = _generate_waveforms_parallel(
+            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors
+        )
+        
+        # Single pass: separate and accumulate
+        for r in chunk_results:
+            if r['success']:
+                all_successful.append(r)
+            else:
+                all_failed.append(r)
+        
+        if num_chunks > 1:
+            print(f"  Chunk: {len([r for r in chunk_results if r['success']])} successful")
+    
+    if not all_successful:
+        raise RuntimeError("No waveforms were successfully generated!")
+    
+    num_success = len(all_successful)
+    num_failed = len(all_failed)
+    print(f"\nGeneration complete: {num_success} successful, {num_failed} failed")
+    
+    # Extract everything in one pass with pre-allocated arrays
+    print(f"\nProcessing {num_success} waveforms...")
+    
+    # Get parameter names and detector names
+    param_names = list(all_successful[0]['params'].keys())
+    num_params = len(param_names)
+    detector_names = list(all_successful[0]['detectors'].keys())
+    num_detectors = len(detector_names)
+    
+    print(f"  Detector channels: {detector_names}")
+    
+    # Pre-scan for lengths
+    lengths = np.array([len(w['detectors'][detector_names[0]]) for w in all_successful])
+    min_len, max_len = lengths.min(), lengths.max()
+    
+    print(f"  Waveform lengths: min={min_len}, max={max_len}")
+    
+    # Check if we have variable lengths
+    if min_len != max_len:
+        if not allow_padding:
+            print(f"  Variable lengths detected: min={min_len}, max={max_len}")
+            print(f"  allow_padding=False: Truncating all to minimum length (no padding)")
+            target_length = min_len
+        else:
+            print(f"  WARNING: Variable lengths detected. Applying zero-padding.")
+            print(f"  Padding will be added at the beginning (before signal starts).")
+            if target_length is None:
+                target_length = max_len
+    else:
+        # All same length
+        target_length = min_len
+
+    # Override target_length if provided
+    if target_length is not None and target_length < max_len and allow_padding:
+        print(f"  WARNING: target_length ({target_length}) < max length ({max_len}). Will truncate!")
+
+    print(f"  Target length: {target_length}")
+
+    # Pre-allocate arrays
+    signal_array = np.zeros((num_success, num_detectors, target_length), dtype=np.float32)
+    param_array = np.zeros((num_success, num_params), dtype=np.float32)
+
+    # Single pass: extract everything
+    for i, w in enumerate(all_successful):
+        # Extract detector signals
+        for j, det_name in enumerate(detector_names):
+            signal_data = w['detectors'][det_name].numpy()
+            current_len = len(signal_data)
+
+            # Truncate or pad based on allow_padding
+            if current_len <= target_length:
+                if allow_padding:
+                    # Pad at beginning (zero-padding before signal starts)
+                    start_idx = target_length - current_len
+                    signal_array[i, j, start_idx:] = signal_data
+                else:
+                    # No padding - just use the signal as-is (already truncated to target_length)
+                    signal_array[i, j, :current_len] = signal_data
+            else:
+                # Truncate (keep end where merger happens)
+                signal_array[i, j] = signal_data[-target_length:]
+        
+        # Extract parameters
+        for j, name in enumerate(param_names):
+            param_array[i, j] = w['params'][name]
+    
+    print(f"  Converting to PyTorch tensors...")
+    
+    # Convert to PyTorch
+    X = torch.from_numpy(signal_array)  # (N, num_detectors, T)
+    y = torch.from_numpy(param_array)    # (N, num_params)
+    
+    print(f"  Tensors: X={X.shape}, y={y.shape}")
+    
+    # Create dataset and split
+    dataset = TensorDataset(X, y)
+    total_size = len(dataset)
+    train_size = int(train_split * total_size)
+    val_size = int(val_split * total_size)
+    test_size = total_size - train_size - val_size
+    
+    train_data, val_data, test_data = random_split(
+        dataset, [train_size, val_size, test_size]
+    )
+    
+    print(f"  Splits: train={train_size}, val={val_size}, test={test_size}")
+    
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+    
+    print(f"\nReady! DataLoaders with batch_size={batch_size}")
+    
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': {
+            'parameter_names': param_names,
+            'num_samples': num_success,
+            'num_failed': num_failed,
+            'waveform_shape': tuple(X.shape[1:]),
+            'channels': detector_names,
+            'train_size': train_size,
+            'val_size': val_size,
+            'test_size': test_size,
+            'batch_size': batch_size,
+            'time_resolution': time_resolution,
+            'approximant': approximant,
+            'f_lower': f_lower,
+            'detectors': detector_names,
+            'target_length': target_length,
+            'original_length_range': (int(min_len), int(max_len)),
+            'chunk_size': chunk_size,
+            'sky_params_provided': sky_params_provided,
+            'allow_padding': allow_padding
+        }
+    }
+
+def save_dataloaders(result: Dict, save_path: str) -> None:
+    """
+    Save the datasets from a pycbc_data_generator result.
+    
+    Parameters
+    ----------
+    result : dict
+        The result dictionary from pycbc_data_generator containing 
+        train_loader, val_loader, test_loader, and metadata
+    save_path : str
+        Path where to save the data (e.g., 'my_data.pt')
+    
+    Examples
+    --------
+    >>> result = pycbc_data_generator(config, num_samples=1000)
+    >>> save_dataloaders(result, 'my_waveforms.pt')
+    """
+    print(f"Saving datasets to {save_path}...")
+    
+    # Extract the underlying datasets and indices from the DataLoaders
+    train_dataset = result['train_loader'].dataset
+    val_dataset = result['val_loader'].dataset
+    test_dataset = result['test_loader'].dataset
+    
+    # Get the full tensors from the base dataset
+    # The subsets have .dataset (base) and .indices attributes
+    base_dataset = train_dataset.dataset
+    X = base_dataset.tensors[0]
+    y = base_dataset.tensors[1]
+    
+    save_data = {
+        'train_indices': train_dataset.indices,
+        'val_indices': val_dataset.indices,
+        'test_indices': test_dataset.indices,
+        'X': X,
+        'y': y,
+        'metadata': result['metadata']
+    }
+    
+    torch.save(save_data, save_path)
+    print(f"  Saved successfully!")
+
+
+def load_dataloaders(load_path: str, batch_size: int = None, shuffle_train: bool = True) -> Dict:
+    """
+    Load previously saved datasets and create DataLoaders.
+    
+    Parameters
+    ----------
+    load_path : str
+        Path to the saved data file (created with save_dataloaders)
+    batch_size : int, optional
+        Batch size for DataLoaders. If None, uses the batch_size from metadata.
+    shuffle_train : bool
+        Whether to shuffle training data. Default: True
+    
+    Returns
+    -------
+    dict with 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    
+    Examples
+    --------
+    >>> # Save after generation
+    >>> result = pycbc_data_generator(config, num_samples=1000)
+    >>> save_dataloaders(result, 'my_data.pt')
+    >>> 
+    >>> # Later, load the data
+    >>> loaded = load_dataloaders('my_data.pt')
+    >>> train_loader = loaded['train_loader']
+    >>> val_loader = loaded['val_loader']
+    >>> test_loader = loaded['test_loader']
+    """
+    print(f"Loading datasets from {load_path}...")
+    
+    # Load the saved data
+    save_data = torch.load(load_path, weights_only=False)
+    
+    X = save_data['X']
+    y = save_data['y']
+    train_indices = save_data['train_indices']
+    val_indices = save_data['val_indices']
+    test_indices = save_data['test_indices']
+    metadata = save_data['metadata']
+    
+    # Use saved batch_size if not provided
+    if batch_size is None:
+        batch_size = metadata['batch_size']
+    else:
+        # Update metadata with new batch_size
+        metadata = metadata.copy()
+        metadata['batch_size'] = batch_size
+    
+    print(f"  Tensors: X={X.shape}, y={y.shape}")
+    print(f"  Splits: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
+    
+    # Recreate the dataset
+    full_dataset = TensorDataset(X, y)
+    
+    # Create subsets using the saved indices
+    from torch.utils.data import Subset
+    train_data = Subset(full_dataset, train_indices)
+    val_data = Subset(full_dataset, val_indices)
+    test_data = Subset(full_dataset, test_indices)
+    
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=shuffle_train)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+    
+    print(f"\nReady! DataLoaders with batch_size={batch_size}")
+    
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': metadata
+    }
 ################### Neural Network Layers ###################
 
 class AffineCouplingLayer(nn.Module):
