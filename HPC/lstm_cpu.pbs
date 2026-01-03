@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -N lstm_cpu
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+module purge
+
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+
+source /rds/general/user/jc5322/home/venv/pycbcenv/bin/activate
+
+cd "$PBS_O_WORKDIR"
+
+echo "=== Running lstm ==="
+python lstm_rebuild.py
