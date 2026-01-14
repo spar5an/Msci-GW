@@ -5,9 +5,9 @@ import torch.nn.functional as F
 import itertools, random
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from tqdm import tqdm
-import data_generator
 import json
 import matplotlib.pyplot as plt
+from JHPY import *
 
 
 class AffineCouplingLayer(nn.Module):
@@ -613,19 +613,15 @@ def infer_waveform_length(dloader):
     return next(iter(dloader))[0].shape[-1]
 
 
-def prepare_pycbc_data():
-    """Generate and prepare PyCBC gravitational wave data with train/val/test split."""
-    config = {'mass1': lambda size: np.random.uniform(10, 50, size=size),
-              'mass2': lambda size: np.random.uniform(10, 50, size=size),
-              'spin1z': lambda size: np.random.uniform(-0.5, 0.5, size=size)}
-    result = data_generator.pycbc_data_generator(config, num_samples=10000, batch_size=16, 
-                                                num_workers=4, allow_padding=True,
-                                                normalize_waveforms=True, detectors=['H1', 'L1'])
-    # Return train/val/test dataloaders
-    return result['train_loader'], result['val_loader'], result['test_loader']
+output = load_dataloaders("data_noise.pt")
+
+train_dloader = output["train_loader"]
+val_dloader = output["val_loader"]
+test_dloader = output["test_loader"]
+metadata = output["metadata"]
 
 
-train_dloader, val_dloader, test_dloader = prepare_pycbc_data()
+
 
 
 def sample_posterior(model, observed_data, num_samples=5000, device='cuda'):  # <- DATA_FLOW [9] OBSERVED WAVEFORMS RECEIVED
@@ -750,18 +746,18 @@ def infer_NPE(model, observed_data, num_samples=5000):  # <- DATA_FLOW [13] OBSE
 
 
 # HYPERPARAMETER SEARCH 
-param_grid = {
-    'lr': [1e-4, 5e-4, 1e-3],
-    'embedding': ['linear', 'conv1d'],
-    'context_dim': [64, 128, 256, 512],
-    'num_flow_layers': [4, 6, 8, 10, 12, 14, 16],
-    'hidden_dim': [128, 256, 512],
-    'optimizer': ['adam'],
-    'grad_clip_norm': [1.0, 5.0, 10.0],
-    'reg_target_std': [0.5, 0.8, 1.0],
-    'reg_max_weight': [0.5, 1.0, 2.0],
-    'reg_warmup_epochs': [10, 15, 20]
-}
+# param_grid = {
+#     'lr': [1e-4, 5e-4, 1e-3],
+#     'embedding': ['linear', 'conv1d'],
+#     'context_dim': [64, 128, 256, 512],
+#     'num_flow_layers': [4, 6, 8, 10, 12, 14, 16],
+#     'hidden_dim': [128, 256, 512],
+#     'optimizer': ['adam'],
+#     'grad_clip_norm': [1.0, 5.0, 10.0],
+#     'reg_target_std': [0.5, 0.8, 1.0],
+#     'reg_max_weight': [0.5, 1.0, 2.0],
+#     'reg_warmup_epochs': [10, 15, 20]
+# }
 
 #best_config, results = npe_hyperparameter_search(
 #    param_grid, 

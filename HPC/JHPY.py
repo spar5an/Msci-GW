@@ -1197,7 +1197,7 @@ def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, v
         'best_val_epoch': best_val_epoch
     }
     
-def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=15, scheduler=None, save_best_model=True, model_path='best_npe_model.pt', grad_clip_norm=5.0, dropout_rate=None):
+def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=15, scheduler=None, save_best_model=True, model_path='best_npe_model.pt', grad_clip_norm=5.0, dropout_rate=None, device='cpu'):
     """
     Train NPE model with log probability, early stopping, validation monitoring, and optional checkpointing.
 
@@ -1223,6 +1223,8 @@ def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, star
     best_val_log_prob = float('-inf')  # Higher is better for log probability
     best_val_epoch = 0
 
+    model.to(device)
+
     # Set dropout rate if specified
     if dropout_rate is not None:
         for m in model.modules():
@@ -1234,6 +1236,8 @@ def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, star
         train_log_prob_sum = 0
 
         for X_train, y_train in tqdm(train_dloader, desc='Epoch {}, training'.format(epoch+1)):
+            X_train = X_train.to(device)
+            y_train = y_train.to(device)
             optimizer.zero_grad()
             log_prob = model(y_train, X_train)
             loss = -log_prob.mean()  # Negative log prob for gradient descent
@@ -1253,6 +1257,8 @@ def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, star
 
         with torch.no_grad():
             for X_valid, y_valid in tqdm(val_dloader, desc='Epoch {}, validation'.format(epoch+1)):
+                X_valid = X_valid.to(device)
+                y_valid = y_valid.to(device)
                 log_prob = model(y_valid, X_valid)
                 val_log_prob_sum += log_prob.mean().item()
 

@@ -9,22 +9,25 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for HPC
 import matplotlib.pyplot as plt
 
+device = torch.device("cuda")
+
 # Load data without noise
 output = load_dataloaders("data_noise.pt")
 
 train_loader = output["train_loader"]
 val_loader = output["val_loader"]
 test_loader = output["test_loader"]
-metadata = output["metadata"]  # Fixed typo: should be "metadata" not "meta_data"
+metadata = output["metadata"]
 
 # Just going to test this on a dingo model before starting on lstm
 model = create_dingo_from_data(metadata)
+
 
 optim = torch.optim.Adam(model.parameters(), lr=5e-4)
 sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optim, mode='max', factor=0.5, patience=6
 )
-training_stuff = train_npe_model(model, optim, 10, train_loader, val_loader, patience=15, scheduler=sched, model_path='best_dingo_model_noise.pt')
+training_stuff = train_npe_model(model, optim, 10, train_loader, val_loader, patience=15, scheduler=sched, model_path='best_dingo_model_noise_gpu.pt')
 
 print("\n=== Training complete ===")
 print(f"Best validation log prob: {training_stuff['best_val_log_prob']:.4f}")
@@ -52,8 +55,8 @@ ax2.legend()
 ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('training_history_no_noise.png', dpi=150, bbox_inches='tight')
-print("\nTraining history saved as 'training_history_no_noise.png'")
+plt.savefig('training_history_no_noise_gpu.png', dpi=150, bbox_inches='tight')
+print("\nTraining history saved as 'training_history_no_noise_gpu.png'")
 plt.close()
 
 from matplotlib.patches import Rectangle  # Rectangle where both axes' 1-sigma regions overlap
@@ -160,8 +163,8 @@ for idx in range(num_test_samples):
         ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('posterior_analysis_no_noise.png', dpi=150, bbox_inches='tight')
-print("\n\nPosterior analysis saved as 'posterior_analysis_no_noise.png'")
+plt.savefig('posterior_analysis_no_noise_gpu.png', dpi=150, bbox_inches='tight')
+print("\n\nPosterior analysis saved as 'posterior_analysis_no_noise_gpu.png'")
 plt.close()
 
 print("\n=== All plots saved successfully ===")

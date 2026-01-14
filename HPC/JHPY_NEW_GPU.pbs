@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -N lstm_gpu
+#PBS -N JHPY_NEW_GPU
 #PBS -l walltime=02:00:00
 #PBS -l select=1:ncpus=4:mem=16gb:ngpus=1 
 #PBS -j oe
@@ -18,4 +18,4 @@ echo "=== Testing it has a GPU ==="
 python -c "import torch; print(torch.cuda.is_available())"
 
 echo "=== Running lstm ==="
-python lstm_rebuild_gpu.py
+python JHPY_NEW.py

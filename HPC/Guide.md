@@ -4,7 +4,7 @@
 On your local machine:
 
 ```bash
-ssh hm2622@login.hpc.ic.ac.uk
+ssh jc5322@login.hc3.hpc.imperial.ac.uk
 ```
 
 On the cluster prompt, we’ll start clean each time with:
@@ -56,8 +56,8 @@ You should see something like:
 
 ```text
 pycbc OK
-pycbc file: /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
-python exe: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+pycbc file: /rds/general/user/jc5322/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
+python exe: /rds/general/user/jc5322/home/venv/pycbcenv/bin/python
 ```
 
 If this fails, stop here and paste the error.
@@ -76,8 +76,8 @@ realpath ~/venv/pycbcenv/bin/activate
 You should get:
 
 ```text
-/rds/general/user/hm2622/home/venv/pycbcenv
-/rds/general/user/hm2622/home/venv/pycbcenv/bin/activate
+/rds/general/user/jc5322/home/venv/pycbcenv
+/rds/general/user/jc5322/home/venv/pycbcenv/bin/activate
 ```
 
 We will use this exact path in the PBS script.
@@ -126,7 +126,7 @@ python test_pycbc.py
 Expected output:
 
 - `=== Inside test_pycbc.py ===`
-- `Python executable: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python`
+- `Python executable: /rds/general/user/jc5322/home/venv/pycbcenv/bin/python`
 - `PyCBC imported OK, version: ...`
 
 If that fails, paste the full output and stop here.
@@ -158,7 +158,7 @@ module purge   # 1) Clean module environment
 module load tools/prod   # 2) Load the same modules as used to create the venv
 module load Python/3.11.3-GCCcore-12.3.0
 
-source /rds/general/user/hm2622/home/venv/pycbcenv/bin/activate    # 3) Activate the SAME virtual environment where PyCBC is installed
+source /rds/general/user/jc5322/home/venv/pycbcenv/bin/activate    # 3) Activate the SAME virtual environment where PyCBC is installed
 								                                                    #    Use the FULL PATH you got from `realpath`
 
 cd "$PBS_O_WORKDIR"	  # 4) Go to the directory from which qsub was run
