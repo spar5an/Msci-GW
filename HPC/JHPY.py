@@ -7,14 +7,21 @@ A lot of this is written by Claude.
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.distributions as dist
 import itertools
 import random
-import os
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from tqdm import tqdm
-import data_generator
+from typing import Dict, List, Callable
+from functools import partial
+from multiprocessing import Pool
+from pycbc.waveform import get_td_waveform
+from pycbc.detector import Detector
+from pycbc.psd import aLIGOZeroDetHighPower
+from pycbc.noise import noise_from_psd
+from pycbc.types import TimeSeries
+from torch.utils.data import Subset
+
 
 
 ################### Miscellaneous functions ###################
@@ -90,7 +97,501 @@ def generate_sine_data(num_simulations=10000, freq_low=0.5, freq_high=5.0, phase
     return {"Amplitudes": amplitudes, "Phases": phases, "Frequencies":frequencies,
             "Train_Loader": train_loader, "Test_Loader": test_loader, "Val_Loader": val_loader}
 
+def _validate_config(config: Dict[str, Callable]) -> None:
+    """Validate configuration dictionary."""
+    if not isinstance(config, dict):
+        raise TypeError("config must be a dictionary")
+    
+    if not config:
+        raise ValueError("config cannot be empty")
+    
+    for key, value in config.items():
+        if not callable(value):
+            raise TypeError(f"config['{key}'] must be callable (e.g., a distribution function)")
+        
+        try:
+            test = value(size=2)
+            if not isinstance(test, np.ndarray):
+                raise TypeError(f"config['{key}']() must return numpy array")
+        except Exception as e:
+            raise ValueError(f"config['{key}'] failed test call: {e}")
 
+
+def _generate_parameter_sets(config: Dict[str, Callable], num_samples: int) -> List[Dict]:
+    """Generate all parameter combinations upfront."""
+    param_arrays = {}
+    for param_name, dist_func in config.items():
+        param_arrays[param_name] = dist_func(size=num_samples)
+    
+    param_dicts = []
+    for i in range(num_samples):
+        param_dict = {name: float(values[i]) for name, values in param_arrays.items()}
+        param_dicts.append(param_dict)
+    
+    return param_dicts
+
+
+def _generate_single_waveform(params: Dict, time_resolution: float, approximant: str,
+                              f_lower: float, detectors: List[str], target_length: int,
+                              add_noise: bool = True) -> Dict:
+    """Worker function to generate a single waveform and project to detectors at fixed length."""
+    try:
+        hp, hc = get_td_waveform(
+            approximant=approximant,
+            mass1=params['mass1'],
+            mass2=params['mass2'],
+            spin1z=params.get('spin1z', 0.0),
+            spin2z=params.get('spin2z', 0.0),
+            inclination=params.get('inclination', 0.0),
+            coa_phase=params.get('coa_phase', 0.0),
+            distance=params.get('distance', 410.0),  # Luminosity distance in Mpc, default 410 Mpc (GW150914)
+            delta_t=time_resolution,
+            f_lower=f_lower
+        )
+
+        # Get sky location parameters (defaults to north pole and zero polarization)
+        ra = params.get('ra', 0.0)
+        dec = params.get('dec', np.pi/2)  # North pole
+        polarization = params.get('polarization', 0.0)
+
+        # Project to detectors and fix to target length
+        detector_signals = {}
+        for det_name in detectors:
+            detector = Detector(det_name)
+            signal = detector.project_wave(hp, hc, ra, dec, polarization, method='lal')
+
+            # Fix signal to target_length (crop or pad)
+            signal_len = len(signal)
+            if signal_len >= target_length:
+                # Crop from the end (keeps merger which is at the end)
+                signal = signal[-target_length:]
+            else:
+                # Zero-pad at the beginning (keeps merger at the end)
+                padded = TimeSeries(np.zeros(target_length, dtype=signal.dtype),
+                                   delta_t=signal.delta_t,
+                                   epoch=signal.start_time - (target_length - signal_len) * signal.delta_t)
+                padded[-signal_len:] = signal
+                signal = padded
+
+            detector_signals[det_name] = signal
+
+        # Add noise to each detector signal (if enabled)
+        if add_noise:
+            for det_name in detectors:
+                signal = detector_signals[det_name]
+
+                # All signals now have exactly target_length, so use that for PSD calculation
+                delta_t = signal.delta_t
+                duration = target_length * delta_t  # Use target_length for consistency
+                delta_f = 1.0 / duration
+
+                # flen is number of frequency bins needed for PSD
+                # For a real time series of length N, FFT produces N//2 + 1 frequency bins
+                flen = target_length // 2 + 1
+
+                # Create PSD with correct frequency resolution
+                psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
+
+                # Generate noise at exactly target_length
+                noise = noise_from_psd(target_length, delta_t, psd)
+
+                # Set noise epoch to match signal epoch for proper alignment
+                noise._epoch = signal._epoch
+
+                # Inject noise into signal (both guaranteed to be target_length)
+                detector_signals[det_name] = signal.inject(noise)
+
+
+        
+        result = {
+            'success': True,
+            'detectors': detector_signals,
+            'params': params
+        }
+        
+        return result
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'params': params}
+
+
+def _generate_waveforms_parallel(param_dicts: List[Dict],
+                                time_resolution: float,
+                                approximant: str,
+                                f_lower: float,
+                                num_workers: int,
+                                show_progress: bool,
+                                detectors: List[str],
+                                target_length: int,
+                                add_noise: bool) -> List[Dict]:
+    """Generate waveforms in parallel using multiprocessing."""
+    worker_func = partial(_generate_single_waveform,
+                          time_resolution=time_resolution,
+                          approximant=approximant,
+                          f_lower=f_lower,
+                          detectors=detectors,
+                          target_length=target_length,
+                          add_noise=add_noise)
+    
+    with Pool(processes=num_workers) as pool:
+        if show_progress:
+            results = list(tqdm(
+                pool.imap_unordered(worker_func, param_dicts, chunksize=100),
+                total=len(param_dicts),
+                desc="Generating waveforms"
+            ))
+        else:
+            results = list(pool.imap_unordered(worker_func, param_dicts, chunksize=100))
+    
+    return results
+
+
+def pycbc_data_generator(config: Dict[str, Callable],
+                        num_samples: int,
+                        time_resolution: float = 1/4096,
+                        approximant: str = 'IMRPhenomXP',
+                        f_lower: float = 40.0,
+                        num_workers: int = None,
+                        signal_length: float = 2.0,
+                        batch_size: int = 256,
+                        chunk_size: int = 10000,
+                        train_split: float = 0.8,
+                        val_split: float = 0.1,
+                        show_progress: bool = True,
+                        detectors: List[str] = None,
+                        add_noise: bool = True) -> Dict:
+    """
+    Generate PyCBC waveforms projected to detectors.
+    Returns PyTorch DataLoaders for training, validation, and testing.
+    
+    Parameters
+    ----------
+    config : dict
+        Dictionary mapping parameter names to numpy distribution functions.
+        
+        Required parameters:
+        - 'mass1': Primary mass (solar masses)
+        - 'mass2': Secondary mass (solar masses)
+        
+        Optional parameters:
+        - 'distance': Luminosity distance in Mpc - default: 410.0 (GW150914)
+        - 'spin1z', 'spin2z': Spin components - default: 0.0
+        - 'inclination', 'coa_phase': Orientation angles - default: 0.0
+        - 'ra': Right ascension (radians) - default: 0.0
+        - 'dec': Declination (radians) - default: π/2 (north pole)
+        - 'polarization': Polarization angle (radians) - default: 0.0
+        - 'tc': Coalescence time - default: 0.0
+        
+    num_samples : int
+        Total number of waveforms to generate
+    time_resolution : float
+        Time step (delta_t). Default: 1/4096
+    approximant : str
+        Waveform approximant. Default: 'IMRPhenomXP'
+    f_lower : float
+        Lower frequency cutoff (Hz). Default: 40.0
+    num_workers : int
+        Parallel processes. Default: min(cpu_count(), 8)
+    batch_size : int
+        DataLoader batch size. Default: 256
+    chunk_size : int
+        Process in chunks for memory. Default: 10000
+    signal_length : float. Default: 2
+        Length in seconds that each signal should be
+    train_split : float
+        Training fraction. Default: 0.8
+    val_split : float
+        Validation fraction. Default: 0.1
+    detectors : list of str
+        Detector names. Default: ['H1', 'L1']
+    add_noise : bool
+        Whether to add detector noise to signals. Default: True
+
+    Returns
+    -------
+    dict with 'train_loader', 'val_loader', 'test_loader', 'metadata'
+        
+    Notes
+    -----
+    If ra, dec, or polarization are not provided in config, they default to:
+    - ra = 0.0
+    - dec = π/2 (north pole)
+    - polarization = 0.0
+    """
+    # Validate inputs
+    _validate_config(config)
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive")
+    if not 0 < train_split < 1 or not 0 < val_split < 1:
+        raise ValueError("train_split and val_split must be between 0 and 1")
+    if train_split + val_split >= 1:
+        raise ValueError("train_split + val_split must be < 1")
+    
+    if num_workers is None:
+        num_workers = 1
+    
+    # Set default detectors
+    if detectors is None:
+        detectors = ['H1', 'L1']
+    
+    # Check which sky parameters are provided
+    sky_params_provided = {
+        'ra': 'ra' in config,
+        'dec': 'dec' in config,
+        'polarization': 'polarization' in config
+    }
+    
+    if any(sky_params_provided.values()):
+        print(f"Generating {num_samples} waveforms with projection to {detectors}")
+        print(f"  Sky parameters: ra={'provided' if sky_params_provided['ra'] else 'default (0.0)'}, "
+              f"dec={'provided' if sky_params_provided['dec'] else 'default (π/2)'}, "
+              f"psi={'provided' if sky_params_provided['polarization'] else 'default (0.0)'}")
+    else:
+        print(f"Generating {num_samples} waveforms with projection to {detectors}")
+        print(f"  Using default sky location: ra=0.0, dec=π/2 (north pole), psi=0.0")
+    
+    # Calculate target length from signal_length parameter
+    target_length = int(signal_length / time_resolution)
+    print(f"Target signal length: {target_length} samples ({signal_length}s at {time_resolution}s resolution)")
+    print(f"Noise injection: {'enabled' if add_noise else 'disabled'}")
+
+    # Generate all parameters upfront
+    param_dicts = _generate_parameter_sets(config, num_samples)
+
+    # Process in chunks for memory efficiency
+    all_successful = []
+    all_failed = []
+    num_chunks = (num_samples + chunk_size - 1) // chunk_size
+
+    for chunk_idx in range(num_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = min(chunk_start + chunk_size, num_samples)
+        chunk_params = param_dicts[chunk_start:chunk_end]
+
+        if num_chunks > 1:
+            print(f"\nChunk {chunk_idx + 1}/{num_chunks} ({len(chunk_params)} waveforms)...")
+
+        # Generate waveforms with detector projection at fixed length
+        chunk_results = _generate_waveforms_parallel(
+            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise
+        )
+        
+        # Single pass: separate and accumulate
+        for r in chunk_results:
+            if r['success']:
+                all_successful.append(r)
+            else:
+                all_failed.append(r)
+        
+        if num_chunks > 1:
+            print(f"  Chunk: {len([r for r in chunk_results if r['success']])} successful")
+    
+    if not all_successful:
+        raise RuntimeError("No waveforms were successfully generated!")
+    
+    num_success = len(all_successful)
+    num_failed = len(all_failed)
+    print(f"\nGeneration complete: {num_success} successful, {num_failed} failed")
+    
+    # Extract everything in one pass with pre-allocated arrays
+    print(f"\nProcessing {num_success} waveforms...")
+
+    # Get parameter names and detector names
+    param_names = list(all_successful[0]['params'].keys())
+    num_params = len(param_names)
+    detector_names = list(all_successful[0]['detectors'].keys())
+    num_detectors = len(detector_names)
+
+    print(f"  Detector channels: {detector_names}")
+    print(f"  All signals fixed to: {target_length} samples ({signal_length}s)")
+
+    # Pre-allocate arrays (all signals are already at target_length)
+    signal_array = np.empty((num_success, num_detectors, target_length), dtype=np.float32)
+    param_array = np.empty((num_success, num_params), dtype=np.float32)
+
+    print(f"  Extracting signals and parameters...")
+
+    # Fill arrays - all signals already at target_length
+    for i, waveform_data in enumerate(all_successful):
+        # Extract parameters directly into array
+        for j, param_name in enumerate(param_names):
+            param_array[i, j] = waveform_data['params'][param_name]
+
+        # Extract detector signals directly (already at correct length, already numpy arrays)
+        for k, det_name in enumerate(detector_names):
+            # TimeSeries objects support array protocol, direct assignment is efficient
+            signal_array[i, k, :] = waveform_data['detectors'][det_name]
+
+    print(f"  Converting to PyTorch tensors...")
+
+    # Convert to PyTorch efficiently using from_numpy (zero-copy view)
+    X = torch.from_numpy(signal_array)  # (N, num_detectors, T)
+    y = torch.from_numpy(param_array)    # (N, num_params)
+    
+    print(f"  Tensors: X={X.shape}, y={y.shape}")
+    
+    # Create dataset and split
+    dataset = TensorDataset(X, y)
+    total_size = len(dataset)
+    train_size = int(train_split * total_size)
+    val_size = int(val_split * total_size)
+    test_size = total_size - train_size - val_size
+    
+    train_data, val_data, test_data = random_split(
+        dataset, [train_size, val_size, test_size]
+    )
+    
+    print(f"  Splits: train={train_size}, val={val_size}, test={test_size}")
+    
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+    
+    print(f"\nReady! DataLoaders with batch_size={batch_size}")
+    
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': {
+            'parameter_names': param_names,
+            'num_samples': num_success,
+            'num_failed': num_failed,
+            'waveform_shape': tuple(X.shape[1:]),
+            'channels': detector_names,
+            'train_size': train_size,
+            'val_size': val_size,
+            'test_size': test_size,
+            'batch_size': batch_size,
+            'time_resolution': time_resolution,
+            'approximant': approximant,
+            'f_lower': f_lower,
+            'detectors': detector_names,
+            'target_length': target_length,
+            'signal_length': signal_length,
+            'chunk_size': chunk_size,
+            'sky_params_provided': sky_params_provided,
+            'add_noise': add_noise,
+        }
+    }
+
+def save_dataloaders(result: Dict, save_path: str) -> None:
+    """
+    Save the datasets from a pycbc_data_generator result.
+    
+    Parameters
+    ----------
+    result : dict
+        The result dictionary from pycbc_data_generator containing 
+        train_loader, val_loader, test_loader, and metadata
+    save_path : str
+        Path where to save the data (e.g., 'my_data.pt')
+    
+    Examples
+    --------
+    >>> result = pycbc_data_generator(config, num_samples=1000)
+    >>> save_dataloaders(result, 'my_waveforms.pt')
+    """
+    print(f"Saving datasets to {save_path}...")
+    
+    # Extract the underlying datasets and indices from the DataLoaders
+    train_dataset = result['train_loader'].dataset
+    val_dataset = result['val_loader'].dataset
+    test_dataset = result['test_loader'].dataset
+    
+    # Get the full tensors from the base dataset
+    # The subsets have .dataset (base) and .indices attributes
+    base_dataset = train_dataset.dataset
+    X = base_dataset.tensors[0]
+    y = base_dataset.tensors[1]
+    
+    save_data = {
+        'train_indices': train_dataset.indices,
+        'val_indices': val_dataset.indices,
+        'test_indices': test_dataset.indices,
+        'X': X,
+        'y': y,
+        'metadata': result['metadata']
+    }
+    
+    torch.save(save_data, save_path)
+    print(f"  Saved successfully!")
+
+
+def load_dataloaders(load_path: str, batch_size: int = None, shuffle_train: bool = True) -> Dict:
+    """
+    Load previously saved datasets and create DataLoaders.
+    
+    Parameters
+    ----------
+    load_path : str
+        Path to the saved data file (created with save_dataloaders)
+    batch_size : int, optional
+        Batch size for DataLoaders. If None, uses the batch_size from metadata.
+    shuffle_train : bool
+        Whether to shuffle training data. Default: True
+    
+    Returns
+    -------
+    dict with 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    
+    Examples
+    --------
+    >>> # Save after generation
+    >>> result = pycbc_data_generator(config, num_samples=1000)
+    >>> save_dataloaders(result, 'my_data.pt')
+    >>> 
+    >>> # Later, load the data
+    >>> loaded = load_dataloaders('my_data.pt')
+    >>> train_loader = loaded['train_loader']
+    >>> val_loader = loaded['val_loader']
+    >>> test_loader = loaded['test_loader']
+    """
+    print(f"Loading datasets from {load_path}...")
+    
+    # Load the saved data
+    save_data = torch.load(load_path, weights_only=False)
+    
+    X = save_data['X']
+    y = save_data['y']
+    train_indices = save_data['train_indices']
+    val_indices = save_data['val_indices']
+    test_indices = save_data['test_indices']
+    metadata = save_data['metadata']
+    
+    # Use saved batch_size if not provided
+    if batch_size is None:
+        batch_size = metadata['batch_size']
+    else:
+        # Update metadata with new batch_size
+        metadata = metadata.copy()
+        metadata['batch_size'] = batch_size
+    
+    print(f"  Tensors: X={X.shape}, y={y.shape}")
+    print(f"  Splits: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
+    
+    # Recreate the dataset
+    full_dataset = TensorDataset(X, y)
+    
+    # Create subsets using the saved indices
+    train_data = Subset(full_dataset, train_indices)
+    val_data = Subset(full_dataset, val_indices)
+    test_data = Subset(full_dataset, test_indices)
+    
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=shuffle_train)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+    
+    print(f"\nReady! DataLoaders with batch_size={batch_size}")
+    
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': metadata
+    }
 ################### Neural Network Layers ###################
 
 class AffineCouplingLayer(nn.Module):
@@ -291,148 +792,81 @@ class EmbeddingNetwork(nn.Module):
             combined = torch.cat(detector_embeddings, dim=1)
             return self.combine_network(combined)
 
-
-class Conv1DEmbeddingNetwork(nn.Module):
-    """
-    Conv1D-based embedding network for waveform data.
-    Efficient for long sequences, good for GW waveforms.
-    """
-    def __init__(self, data_dim=5868, context_dim=512, num_filters=[64, 128, 256]):
-        """
-        Initialize Conv1D embedding network.
-
-        Args:
-            data_dim (int, optional): Input waveform dimension. Defaults to 5868.
-            context_dim (int, optional): Output context dimension. Defaults to 512.
-            num_filters (list, optional): Number of filters per conv layer. Defaults to [64, 128, 256].
-        """
-        super().__init__()
-        self.data_dim = data_dim
-        self.context_dim = context_dim
-        
-        # Conv layers with batch norm and ReLU
-        self.conv1 = nn.Sequential(
-            nn.Conv1d(1, num_filters[0], kernel_size=15, stride=2, padding=7),
-            nn.BatchNorm1d(num_filters[0]),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        
-        self.conv2 = nn.Sequential(
-            nn.Conv1d(num_filters[0], num_filters[1], kernel_size=15, stride=2, padding=7),
-            nn.BatchNorm1d(num_filters[1]),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        
-        self.conv3 = nn.Sequential(
-            nn.Conv1d(num_filters[1], num_filters[2], kernel_size=15, stride=2, padding=7),
-            nn.BatchNorm1d(num_filters[2]),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        
-        # Global average pooling
-        self.global_pool = nn.AdaptiveAvgPool1d(1)
-        
-        # Final dense layer
-        self.fc = nn.Sequential(
-            nn.Linear(num_filters[2], 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, context_dim),
-            nn.LayerNorm(context_dim)
-        )
-    
-    def forward(self, data):
-        """
-        Forward pass: embed waveform to context vector.
-
-        Args:
-            data (torch.Tensor): Waveform data [batch_size, data_dim]
-
-        Returns:
-            torch.Tensor: Context embedding [batch_size, context_dim]
-        """
-        x = data.unsqueeze(1)  # [batch, 1, data_dim]
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.global_pool(x)  # [batch, filters, 1]
-        x = x.view(x.size(0), -1)  # [batch, filters]
-        context = self.fc(x)
-        return context
-
-
-class LSTMEmbeddingNetwork(nn.Module):
-    """
-    LSTM-based embedding network for waveform data.
-    Better at capturing temporal dependencies in waveforms.
-    """
-    def __init__(self, data_dim=7241, context_dim=512, hidden_dim=256, num_layers=2):
-        """
-        Initialize LSTM embedding network.
-
-        Args:
-            data_dim (int, optional): Input waveform dimension. Defaults to 7241.
-            context_dim (int, optional): Output context dimension. Defaults to 512.
-            hidden_dim (int, optional): LSTM hidden size. Defaults to 256.
-            num_layers (int, optional): Number of LSTM layers. Defaults to 2.
-        """
-        super().__init__()
-        self.data_dim = data_dim
-        self.context_dim = context_dim
-        self.hidden_dim = hidden_dim
-        
-        # Initial projection
-        self.input_proj = nn.Sequential(
-            nn.Linear(1, 32),
-            nn.ReLU()
-        )
-        
-        # LSTM layers
-        self.lstm = nn.LSTM(
-            input_size=32,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=0.1 if num_layers > 1 else 0
-        )
-        
-        # Output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, context_dim),
-            nn.LayerNorm(context_dim)
-        )
-    
-    def forward(self, data):
-        """
-        Forward pass: embed waveform to context vector.
-
-        Args:
-            data (torch.Tensor): Waveform data [batch_size, data_dim]
-
-        Returns:
-            torch.Tensor: Context embedding [batch_size, context_dim]
-        """
-        x = data.unsqueeze(-1)  # [batch, data_dim, 1]
-        x = self.input_proj(x)  # [batch, data_dim, 32]
-        lstm_out, (h_n, c_n) = self.lstm(x)
-        h_forward = h_n[-2, :, :]
-        h_backward = h_n[-1, :, :]
-        final_state = torch.cat([h_forward, h_backward], dim=1)
-        context = self.output_proj(final_state)
-        return context
-
-
 ################### Model Classes ###################
+
+class ParameterPredictor(nn.Module):
+    """
+    LSTM-based neural network for predicting scalar parameters from time series.
+
+    Configurable model with LSTM layers followed by fully connected layers.
+    Config options: lstm_hidden_size (256), lstm_num_layers (1), fc_layer_sizes ([128, 64]),
+    activation ('silu'/'relu'/'tanh'), dropout (0.0).
+    """
+    def __init__(self, config=None):
+        """
+        Initialize model with optional config overrides.
+
+        Args:
+            config (dict, optional): Config dict with lstm_hidden_size, lstm_num_layers, fc_layer_sizes, activation, dropout.
+        """
+        super().__init__()
+
+        # Default configuration
+        default_config = {
+            'lstm_hidden_size': 256,
+            'lstm_num_layers': 1,
+            'fc_layer_sizes': [128, 64],  # Sizes of fully connected layers before output
+            'activation': 'silu',  # 'silu', 'relu', 'tanh'
+            'dropout': 0.0,  # Dropout probability
+        }
+
+        if config is None:
+            config = {}
+        self.config = {**default_config, **config}
+        self.lstm = nn.LSTM(
+            input_size=1,
+            hidden_size=self.config['lstm_hidden_size'],
+            num_layers=self.config['lstm_num_layers'],
+            batch_first=True,
+            dropout=self.config['dropout'] if self.config['lstm_num_layers'] > 1 else 0.0
+        )
+
+        fc_layers = []
+        input_size = self.config['lstm_hidden_size']
+
+        for hidden_size in self.config['fc_layer_sizes']:
+            fc_layers.append(nn.Linear(input_size, hidden_size))
+
+            if self.config['activation'] == 'silu':
+                fc_layers.append(nn.SiLU())
+            elif self.config['activation'] == 'relu':
+                fc_layers.append(nn.ReLU())
+            elif self.config['activation'] == 'tanh':
+                fc_layers.append(nn.Tanh())
+
+            if self.config['dropout'] > 0:
+                fc_layers.append(nn.Dropout(self.config['dropout']))
+
+            input_size = hidden_size
+
+        fc_layers.append(nn.Linear(input_size, 3))
+
+        self.fc = nn.Sequential(*fc_layers)
+
+    def forward(self, x):
+        """
+        Forward pass: process time series through LSTM and FC layers.
+
+        Args:
+            x (torch.Tensor): Input shape [batch, sequence_length]
+
+        Returns:
+            torch.Tensor: Output shape [batch, 3] with predictions for amplitude, frequency, phase
+        """
+        x = x.unsqueeze(-1)
+        lstm_out, _ = self.lstm(x)
+        last_out = lstm_out[:, -1, :]
+        return self.fc(last_out)
 
 class NormalizingFlow(nn.Module):
     """
@@ -471,9 +905,8 @@ class NormalizingFlow(nn.Module):
             for i in range(num_layers)
         ])
 
-        # Base distribution: standard Gaussian 
-        self.register_buffer('base_mean', torch.zeros(param_dim))
-        self.register_buffer('base_std', torch.ones(param_dim))
+        # Base distribution: standard Gaussian using PyTorch distributions
+        self.base_dist = dist.Normal(loc=0.0, scale=1.0)
 
     def forward(self, params, context):
         """
@@ -494,10 +927,8 @@ class NormalizingFlow(nn.Module):
             z, log_det = layer(z, context, reverse=False)
             log_det_sum += log_det
 
-        # Compute log probability under base distribution
-        log_prob_base = -0.5 * (torch.log(2 * np.pi * self.base_std**2) + 
-                                 ((z - self.base_mean) / self.base_std)**2)
-        log_prob_base = log_prob_base.sum(dim=1)
+        # Compute log probability under base distribution using PyTorch distributions
+        log_prob_base = self.base_dist.log_prob(z).sum(dim=1)
 
         # Apply change of variables
         log_prob = log_prob_base + log_det_sum
@@ -519,8 +950,8 @@ class NormalizingFlow(nn.Module):
 
         context_repeated = context.repeat_interleave(num_samples, dim=0)
 
-        # Sample from base distribution
-        z = torch.randn(batch_size * num_samples, self.param_dim, device=context.device)
+        # Sample from base distribution using PyTorch distributions
+        z = self.base_dist.sample((batch_size * num_samples, self.param_dim)).to(context.device)
 
         # Apply inverse flow transformations
         for layer in reversed(self.layers):
@@ -537,31 +968,21 @@ class DINGOModel(nn.Module):
 
     Supports multi-detector data with configurable processing strategies.
     """
-    def __init__(self, data_dim=100, param_dim=1, context_dim=64, 
-                 num_flow_layers=6, hidden_dim=128, embedding='conv1d',
-                 config=None):
-        """
-        Initialize DINGO model.
-
-        Args:
-            data_dim (int, optional): Waveform dimension. Defaults to 100.
-            param_dim (int, optional): Parameter space dimension. Defaults to 1.
-            context_dim (int, optional): Context dimension. Defaults to 64.
-            num_flow_layers (int, optional): Number of flow layers. Defaults to 6.
-            hidden_dim (int, optional): Hidden layer size. Defaults to 128.
-            embedding (str, optional): Embedding type: 'conv1d', 'lstm', 'linear'. Defaults to 'conv1d'.
-            config (dict, optional): Config dict for flexibility. Defaults to None.
-        """
+    def __init__(self, data_dim=100, param_dim=1, context_dim=64,
+                 num_flow_layers=6, hidden_dim=128, num_detectors=1,
+                 multi_detector_mode='concatenate', config=None):
         super().__init__()
-        
+
+        # Support both positional args and config dict
         if config is not None:
             data_dim = config.get('data_dim', data_dim)
             param_dim = config.get('param_dim', param_dim)
             context_dim = config.get('context_dim', context_dim)
             num_flow_layers = config.get('num_flow_layers', num_flow_layers)
             hidden_dim = config.get('hidden_dim', hidden_dim)
-            embedding = config.get('embedding', embedding)
-        
+            num_detectors = config.get('num_detectors', num_detectors)
+            multi_detector_mode = config.get('multi_detector_mode', multi_detector_mode)
+
         # Store config for checkpointing
         self.config = {
             'data_dim': data_dim,
@@ -569,39 +990,24 @@ class DINGOModel(nn.Module):
             'context_dim': context_dim,
             'num_flow_layers': num_flow_layers,
             'hidden_dim': hidden_dim,
-            'embedding': embedding
+            'num_detectors': num_detectors,
+            'multi_detector_mode': multi_detector_mode
         }
-        
-        # Choose embedding architecture
-        if embedding.lower() == 'lstm' and data_dim > 1000:
-            self.embedding_net = LSTMEmbeddingNetwork(
-                data_dim=data_dim, context_dim=context_dim,
-                hidden_dim=256, num_layers=2
-            )
-        elif embedding.lower() == 'conv1d' and data_dim > 1000:
-            self.embedding_net = Conv1DEmbeddingNetwork(
-                data_dim=data_dim, context_dim=context_dim,
-                num_filters=[64, 128, 256]
-            )
-        elif embedding.lower() == 'linear':
-            # Simple linear MLP embedding
-            self.embedding_net = EmbeddingNetwork(
-                data_dim=data_dim, context_dim=context_dim,
-                hidden_dim=hidden_dim
-            )
-        else:  # fallback: default linear MLP
-            self.embedding_net = EmbeddingNetwork(
-                data_dim=data_dim, context_dim=context_dim,
-                hidden_dim=hidden_dim
-            )
-        
+
+        self.embedding_net = EmbeddingNetwork(
+            data_dim=data_dim,
+            context_dim=context_dim,
+            hidden_dim=hidden_dim,
+            num_detectors=num_detectors,
+            multi_detector_mode=multi_detector_mode
+        )
+
         self.flow = NormalizingFlow(
             param_dim=param_dim,
             context_dim=context_dim,
             num_layers=num_flow_layers,
             hidden_dim=hidden_dim
         )
-    
 
     def forward(self, params, data):
         """
@@ -640,305 +1046,277 @@ class DINGOModel(nn.Module):
         return samples
 
 ################### Training Functions ###################
-
-def train_npe_pycbc(model, train_dloader, val_dloader=None,
-                    n_epochs=100, lr=1e-4, optimizer='adam', 
-                    scheduler=None, start_epoch=0, save_best_model=True, 
-                    model_path='best_npe_pycbc_model.pt', grad_clip_norm=5.0, 
-                    use_mixed_precision=True, device='cuda', reg_config=None,
-                    verbose=True):
+    
+def train_predictor_model(model, optimizer, loss_fcn, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=8, scheduler=None, save_best_model=True, model_path='best_predictor_model.pt', grad_clip_norm=5.0, dropout_rate=None):
     """
-    Train NPE model on PyCBC gravitational wave data with checkpointing.
+    Train model with early stopping, validation monitoring, gradient clipping, and optional checkpointing.
 
     Args:
-        model (nn.Module): DINGO NPE model to train
-        train_dloader (DataLoader): Training data loader yielding (params, data) tuples
-        val_dloader (DataLoader, optional): Validation data loader. Defaults to None.
-        n_epochs (int, optional): Number of training epochs. Defaults to 100.
-        lr (float, optional): Learning rate. Defaults to 1e-4.
-        optimizer (str, optional): Optimizer type ('adam', 'adamw', 'sgd'). Defaults to 'adam'.
-        scheduler (torch.optim.lr_scheduler, optional): LR scheduler. Defaults to None.
+        model (nn.Module): PyTorch model to train
+        optimizer (torch.optim.Optimizer): Optimizer for training
+        loss_fcn (callable): Loss function
+        n_epochs (int): Number of epochs to train
+        train_dloader (DataLoader): Training data loader
+        val_dloader (DataLoader): Validation data loader
         start_epoch (int, optional): Starting epoch for resume. Defaults to 0.
-        save_best_model (bool, optional): Save model checkpoint. Defaults to True.
-        model_path (str, optional): Path for checkpoint. Defaults to 'best_npe_pycbc_model.pt'.
+        patience (int, optional): Epochs to wait before early stopping. Defaults to 8.
+        scheduler (torch.optim.lr_scheduler, optional): LR scheduler. Defaults to None.
+        save_best_model (bool, optional): Save best model checkpoint. Defaults to True.
+        model_path (str, optional): Path for checkpoint. Defaults to 'best_predictor_model.pt'.
         grad_clip_norm (float, optional): Max gradient norm for clipping. Set to None to disable. Defaults to 5.0.
-        use_mixed_precision (bool, optional): Use mixed precision training. Defaults to True.
-        device (str, optional): Device ('cuda' or 'cpu'). Defaults to 'cuda'.
-        reg_config (dict, optional): Regularization config with keys: 'target_std', 'max_weight', 'warmup_epochs'.
-        verbose (bool, optional): Print progress. Defaults to True.
+        dropout_rate (float, optional): Dropout probability (0.0-1.0). None uses model's default. Defaults to None.
 
     Returns:
-        dict: Contains 'train_log_probs', 'train_losses', 'context_stds', 'reg_losses', 'val_log_probs', 'best_val_log_prob', 'best_val_epoch'.
+        dict: Contains 'train_losses', 'val_losses', 'train_metrics', 'val_metrics', 'best_val_loss', 'best_val_epoch'.
     """
-    
-    # Move model to device
-    model = model.to(device)
-    
-    # Setup optimizer
-    if optimizer.lower() == 'adamw':
-        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    elif optimizer.lower() == 'sgd':
-        opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-    else:  # default to Adam
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
-    
-    # Setup learning rate scheduler if provided
-    if scheduler is None and hasattr(model, 'config'):
-        # Default: cosine annealing if no scheduler specified
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=n_epochs, eta_min=lr * 0.01
-        )
-    
-    # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if use_mixed_precision and torch.cuda.is_available() else None
-    torch.backends.cudnn.benchmark = True
-    
-    # Regularization configuration
-    if reg_config is None:
-        reg_config = {'target_std': 0.8, 'max_weight': 1.0, 'warmup_epochs': 15}
-    
-    reg_target_std = reg_config.get('target_std', 0.8)
-    reg_max_weight = reg_config.get('max_weight', 1.0)
-    reg_warmup_epochs = reg_config.get('warmup_epochs', 15)
-    
-    # Training variables
-    train_log_probs = []
-    val_log_probs = []
-    train_losses = []
-    context_stds = []
-    reg_losses = []
-    
-    best_val_log_prob = float('-inf')
+    train_losses, val_losses = [], []
+    train_metrics, val_metrics = [], []
+    best_val_loss = float('inf')
     best_val_epoch = 0
-    
-    if verbose:
-        print(f"\nTraining NPE Model on PyCBC Data")
-        print(f"  Learning rate: {lr}")
-        print(f"  Optimizer: {optimizer}")
-        print(f"  Gradient clipping: {grad_clip_norm if grad_clip_norm else 'disabled'}")
-        print(f"  Regularization: target_std={reg_target_std}, max_weight={reg_max_weight}, warmup={reg_warmup_epochs} epochs")
-        print(f"  Validation: {'Yes' if val_dloader else 'No'}\n")
-    
+
+    # Set dropout rate if specified
+    if dropout_rate is not None:
+        for m in model.modules():
+            if isinstance(m, torch.nn.Dropout):
+                m.p = dropout_rate
+
     for epoch in range(start_epoch, start_epoch + n_epochs):
-        # ============= TRAINING PHASE =============
         model.train()
-        train_log_prob_sum = 0
-        train_loss_sum = 0
-        context_std_sum = 0
-        reg_loss_sum = 0
-        batch_count = 0
-        
-        batch_iterator = tqdm(
-            train_dloader,
-            desc=f'Epoch {epoch+1:3d}/{start_epoch + n_epochs}, training',
-            disable=not verbose
+        tloss, vloss = 0, 0
+        train_predictions = []
+        train_targets = []
+
+        for X_train, y_train in tqdm(train_dloader, desc='Epoch {}, training'.format(epoch+1)):
+            optimizer.zero_grad()
+            pred = model(X_train)
+            loss = loss_fcn(pred, y_train)
+            tloss += loss.item()
+            loss.backward()
+
+            # Gradient clipping
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+
+            optimizer.step()
+
+            train_predictions.extend(pred.detach().numpy())
+            train_targets.extend(y_train.numpy())
+
+            
+        model.eval()
+        vloss = 0
+        val_predictions = []
+        val_targets = []
+
+        with torch.no_grad():
+            for X_valid, y_valid in tqdm(val_dloader, desc='Epoch {}, validation'.format(epoch+1)):
+                pred = model(X_valid)
+                loss = loss_fcn(pred, y_valid)
+                vloss += loss.item()
+                val_predictions.extend(pred.numpy())
+                val_targets.extend(y_valid.numpy())
+
+        # Calculate metrics
+        train_metrics_dict = calculate_metrics(
+            np.array(train_predictions), 
+            np.array(train_targets)
         )
-        
-        for batch_params, batch_data in batch_iterator:
-            batch_params = batch_params.to(device)
-            batch_data = batch_data.to(device)
-            
-            # Compute regularization weight (linear warmup)
-            reg_weight = reg_max_weight * min(epoch + 1, reg_warmup_epochs) / reg_warmup_epochs
-            
-            opt.zero_grad()
-            
-            if scaler is not None:
-                # Mixed precision training
-                with torch.cuda.amp.autocast():
-                    log_prob = model(batch_params, batch_data)
-                    nll_loss = -log_prob.mean()
-                    
-                    # Regularization: keep context embeddings expressive
-                    context = model.embedding_net(batch_data)
-                    context_std = context.std(dim=0).mean()
-                    reg_loss = reg_weight * F.relu(reg_target_std - context_std) ** 2
-                    
-                    total_loss = nll_loss + reg_loss
-                
-                scaler.scale(total_loss).backward()
-                
-                if grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-                
-                scaler.step(opt)
-                scaler.update()
-            else:
-                # Standard training (CPU or mixed precision disabled)
-                log_prob = model(batch_params, batch_data)
-                nll_loss = -log_prob.mean()
-                
-                context = model.embedding_net(batch_data)
-                context_std = context.std(dim=0).mean()
-                reg_loss = reg_weight * F.relu(reg_target_std - context_std) ** 2
-                
-                total_loss = nll_loss + reg_loss
-                
-                total_loss.backward()
-                
-                if grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
-                
-                opt.step()
-            
-            # Accumulate metrics
-            train_log_prob_sum += log_prob.mean().item()
-            train_loss_sum += total_loss.item()
-            context_std_sum += context_std.item()
-            reg_loss_sum += reg_loss.item()
-            batch_count += 1
-        
-        # Compute epoch averages
-        avg_train_log_prob = train_log_prob_sum / batch_count
-        avg_train_loss = train_loss_sum / batch_count
-        avg_context_std = context_std_sum / batch_count
-        avg_reg_loss = reg_loss_sum / batch_count
-        
-        train_log_probs.append(avg_train_log_prob)
+        val_metrics_dict = calculate_metrics(
+            np.array(val_predictions), 
+            np.array(val_targets)
+        )
+
+        # Store losses
+        avg_train_loss = tloss / len(train_dloader)
+        avg_val_loss = vloss / len(val_dloader)
         train_losses.append(avg_train_loss)
-        context_stds.append(avg_context_std)
-        reg_losses.append(avg_reg_loss)
+        val_losses.append(avg_val_loss)
         
-        # ============= VALIDATION PHASE =============
-        val_log_prob = None
-        if val_dloader is not None:
-            model.eval()
-            val_log_prob_sum = 0
-            val_batch_count = 0
-            
-            with torch.no_grad():
-                for batch_params, batch_data in val_dloader:
-                    batch_params = batch_params.to(device)
-                    batch_data = batch_data.to(device)
-                    
-                    log_prob = model(batch_params, batch_data)
-                    val_log_prob_sum += log_prob.mean().item()
-                    val_batch_count += 1
-            
-            val_log_prob = val_log_prob_sum / val_batch_count
-            val_log_probs.append(val_log_prob)
-        
-        # ============= LOGGING & CHECKPOINTING =============
-        if verbose:
-            if val_log_prob is not None:
-                print(f"[Epoch {epoch+1:3d}] Train LogProb: {avg_train_log_prob:8.4f}, Loss: {avg_train_loss:8.4f}, "
-                      f"CtxStd: {avg_context_std:6.4f}, RegLoss: {avg_reg_loss:8.6f} | "
-                      f"Val LogProb: {val_log_prob:8.4f}")
-            else:
-                print(f"[Epoch {epoch+1:3d}] LogProb: {avg_train_log_prob:8.4f}, Loss: {avg_train_loss:8.4f}, "
-                      f"CtxStd: {avg_context_std:6.4f}, RegLoss: {avg_reg_loss:8.6f}")
-        
+        # Store metrics
+        train_metrics.append(train_metrics_dict)
+        val_metrics.append(val_metrics_dict)
+
+        # Print epoch results
+        print(f"\n[Epoch {epoch+1:2d}]")
+        print(f"Training - Loss: {avg_train_loss:.4f}, MAE: {train_metrics_dict['mae']:.4f}, "
+              f"RMSE: {train_metrics_dict['rmse']:.4f}, R²: {train_metrics_dict['r2']:.4f}")
+        print(f"Validation - Loss: {avg_val_loss:.4f}, MAE: {val_metrics_dict['mae']:.4f}, "
+              f"RMSE: {val_metrics_dict['rmse']:.4f}, R²: {val_metrics_dict['r2']:.4f} \n")
+
         # Learning rate scheduling
         if scheduler is not None:
-            if hasattr(scheduler, 'step'):
-                if val_log_prob is not None:
-                    scheduler.step(val_log_prob)
-                else:
-                    scheduler.step()
-        
-        # Early stopping and checkpointing with validation
-        if val_log_prob is not None:
-            if val_log_prob > best_val_log_prob:
-                if verbose:
-                    print("  New best validation performance\n")
-                best_val_log_prob = val_log_prob
-                best_val_epoch = epoch
-                
-                if save_best_model:
-                    checkpoint = {
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': opt.state_dict(),
-                        'best_val_log_prob': best_val_log_prob,
-                        'model_config': model.config if hasattr(model, 'config') else None,
-                        'train_log_probs': train_log_probs,
-                        'val_log_probs': val_log_probs,
-                        'train_losses': train_losses
-                    }
-                    torch.save(checkpoint, model_path)
-                    if verbose:
-                        print(f"  Checkpoint saved to {model_path}\n")
-        else:
-            # Save checkpoint periodically if no validation
-            if save_best_model and (epoch + 1) % 10 == 0:
+            old_lr = [param_group['lr'] for param_group in optimizer.param_groups]
+            scheduler.step(avg_val_loss)
+            new_lr = [param_group['lr'] for param_group in optimizer.param_groups]
+
+            # If learning rate changed, load best model and continue training
+            if old_lr != new_lr and save_best_model:
+                print(f"Learning rate reduced. Loading best model from {model_path}")
+                checkpoint = torch.load(model_path, weights_only=False)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Keep the reduced learning rate by reapplying it to all param groups
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = new_lr[optimizer.param_groups.index(param_group)]
+                print("Best model loaded, resuming training\n")
+
+            print(f"Current learning rates: {new_lr}")
+
+        # Early stopping check
+        if avg_val_loss < best_val_loss:
+            print("New best validation performance \n")
+            best_val_loss = avg_val_loss
+            best_val_epoch = epoch
+            
+            # Save the best model
+            if save_best_model:
                 checkpoint = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': opt.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_val_loss': best_val_loss,
                     'model_config': model.config if hasattr(model, 'config') else None,
-                    'train_log_probs': train_log_probs,
-                    'train_losses': train_losses
+                    'train_losses': train_losses,
+                    'val_losses': val_losses,
+                    'train_metrics': train_metrics,
+                    'val_metrics': val_metrics
                 }
                 torch.save(checkpoint, model_path)
-                if verbose:
-                    print(f"  Checkpoint saved to {model_path}\n")
+                print(f"Model checkpoint saved to {model_path}\n")
+                
+        elif best_val_epoch <= epoch - patience:
+            print(f'No improvement in validation loss in last {patience} epochs \n')
+            break
+
+    return {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'train_metrics': train_metrics,
+        'val_metrics': val_metrics,
+        'best_val_loss': best_val_loss,
+        'best_val_epoch': best_val_epoch
+    }
     
-    if verbose:
-        print(f"\nTraining complete!")
-        print(f"  Final training log prob: {train_log_probs[-1]:.4f}")
-        if val_log_probs:
-            print(f"  Best validation log prob: {best_val_log_prob:.4f}")
-            print(f"  Best epoch: {best_val_epoch + 1}\n")
-    
+def train_npe_model(model, optimizer, n_epochs, train_dloader, val_dloader, start_epoch=0, patience=15, scheduler=None, save_best_model=True, model_path='best_npe_model.pt', grad_clip_norm=5.0, dropout_rate=None):
+    """
+    Train NPE model with log probability, early stopping, validation monitoring, and optional checkpointing.
+
+    Args:
+        model (nn.Module): PyTorch model to train
+        optimizer (torch.optim.Optimizer): Optimizer for training
+        n_epochs (int): Number of epochs to train
+        train_dloader (DataLoader): Training data loader
+        val_dloader (DataLoader): Validation data loader
+        start_epoch (int, optional): Starting epoch for resume. Defaults to 0.
+        patience (int, optional): Epochs to wait for improvement before early stopping. Defaults to 15.
+        scheduler (torch.optim.lr_scheduler, optional): LR scheduler. Defaults to None.
+        save_best_model (bool, optional): Save best model checkpoint. Defaults to True.
+        model_path (str, optional): Path for checkpoint. Defaults to 'best_npe_model.pt'.
+        grad_clip_norm (float, optional): Max gradient norm for clipping. Set to None to disable. Defaults to 5.0.
+        dropout_rate (float, optional): Dropout probability (0.0-1.0). None uses model's default. Defaults to None.
+
+    Returns:
+        dict: Contains 'train_log_probs', 'val_log_probs', 'best_val_log_prob', 'best_val_epoch'.
+    """
+    train_log_probs = []
+    val_log_probs = []
+    best_val_log_prob = float('-inf')  # Higher is better for log probability
+    best_val_epoch = 0
+
+    # Set dropout rate if specified
+    if dropout_rate is not None:
+        for m in model.modules():
+            if isinstance(m, torch.nn.Dropout):
+                m.p = dropout_rate
+
+    for epoch in range(start_epoch, start_epoch + n_epochs):
+        model.train()
+        train_log_prob_sum = 0
+
+        for X_train, y_train in tqdm(train_dloader, desc='Epoch {}, training'.format(epoch+1)):
+            optimizer.zero_grad()
+            log_prob = model(y_train, X_train)
+            loss = -log_prob.mean()  # Negative log prob for gradient descent
+            
+            loss.backward()
+            
+            # Gradient clipping
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+            
+            optimizer.step()
+            
+            train_log_prob_sum += log_prob.mean().item()
+
+        model.eval()
+        val_log_prob_sum = 0
+
+        with torch.no_grad():
+            for X_valid, y_valid in tqdm(val_dloader, desc='Epoch {}, validation'.format(epoch+1)):
+                log_prob = model(y_valid, X_valid)
+                val_log_prob_sum += log_prob.mean().item()
+
+        # Compute averages
+        avg_train_log_prob = train_log_prob_sum / len(train_dloader)
+        avg_val_log_prob = val_log_prob_sum / len(val_dloader)
+        train_log_probs.append(avg_train_log_prob)
+        val_log_probs.append(avg_val_log_prob)
+
+        # Print epoch results
+        print(f"\n[Epoch {epoch+1:2d}]")
+        print(f"Training - Log Prob: {avg_train_log_prob:.4f}")
+        print(f"Validation - Log Prob: {avg_val_log_prob:.4f}")
+
+        # Learning rate scheduling (higher log prob is better)
+        if scheduler is not None:
+            old_lr = [param_group['lr'] for param_group in optimizer.param_groups]
+            scheduler.step(avg_val_log_prob)
+            new_lr = [param_group['lr'] for param_group in optimizer.param_groups]
+
+            # If learning rate changed, load best model and continue training
+            if old_lr != new_lr and save_best_model:
+                print(f"Learning rate reduced. Loading best model from {model_path}")
+                checkpoint = torch.load(model_path, weights_only=False)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Keep the reduced learning rate by reapplying it to all param groups
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = new_lr[optimizer.param_groups.index(param_group)]
+                print("Best model loaded, resuming training\n")
+
+            print(f"Current learning rates: {new_lr}")
+
+        # Early stopping check (higher log prob is better)
+        if avg_val_log_prob > best_val_log_prob:
+            print("New best validation performance \n")
+            best_val_log_prob = avg_val_log_prob
+            best_val_epoch = epoch
+
+            # Save the best model
+            if save_best_model:
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_val_log_prob': best_val_log_prob,
+                    'model_config': model.config if hasattr(model, 'config') else None,
+                    'train_log_probs': train_log_probs,
+                    'val_log_probs': val_log_probs
+                }
+                torch.save(checkpoint, model_path)
+                print(f"Model checkpoint saved to {model_path}\n")
+
+        elif best_val_epoch <= epoch - patience:
+            print(f'No improvement in validation log prob in last {patience} epochs \n')
+            break
+
     return {
         'train_log_probs': train_log_probs,
         'val_log_probs': val_log_probs,
-        'train_losses': train_losses,
-        'context_stds': context_stds,
-        'reg_losses': reg_losses,
-        'best_val_log_prob': best_val_log_prob if val_log_probs else None,
+        'best_val_log_prob': best_val_log_prob,
         'best_val_epoch': best_val_epoch
     }
-
-################### Inference Function ###################
-
-
-def sample_posterior(model, observed_data, num_samples=5000, device='cuda'):
-    """
-    Sample from posterior p(params | data) using trained NPE model.
-
-    Args:
-        model (nn.Module): Trained NPE model
-        observed_data (np.ndarray or torch.Tensor): Observed waveform data [data_dim] or [batch_size, data_dim]
-        num_samples (int, optional): Number of posterior samples. Defaults to 5000.
-        device (str, optional): Device ('cuda' or 'cpu'). Defaults to 'cuda'.
-
-    Returns:
-        np.ndarray: Posterior samples [batch_size, num_samples, param_dim] or [num_samples, param_dim] if single input.
-    """
-    model.eval()
-    model = model.to(device)
     
-    # Convert to tensor if needed
-    if isinstance(observed_data, np.ndarray):
-        data_tensor = torch.FloatTensor(observed_data)
-    else:
-        data_tensor = observed_data.clone()
-    
-    # Handle batch dimension
-    single_sample = (data_tensor.dim() == 1)
-    if single_sample:
-        data_tensor = data_tensor.unsqueeze(0)
-    
-    data_tensor = data_tensor.to(device)
-    
-    with torch.no_grad():
-        samples = model.sample_posterior(data_tensor, num_samples=num_samples)
-        samples = samples.cpu().numpy()
-    
-    # Reshape to match input format
-    if single_sample:
-        # Return [num_samples, param_dim] for single input
-        samples = samples.reshape(num_samples, -1)
-    else:
-        # Return [batch_size, num_samples, param_dim] for batch input
-        batch_size = len(observed_data)
-        param_dim = samples.shape[1]
-        samples = samples.reshape(batch_size, num_samples, param_dim)
-    
-    return samples
-
-
 ################### Other Neural Network Functions ###################
 
 def calculate_metrics(predictions, targets):
@@ -965,68 +1343,58 @@ def calculate_metrics(predictions, targets):
         'r2': r2
     }
 
-
-
-def load_npe_checkpoint(model_path='best_npe_pycbc_model.pt'):
+def load_predictor(model_path='best_predictor_model.pt'):
     """
-    Load saved NPE model checkpoint.
+    Load saved ParameterPredictor checkpoint.
 
     Args:
-        model_path (str, optional): Path to checkpoint. Defaults to 'best_npe_pycbc_model.pt'.
+        model_path (str, optional): Path to checkpoint. Defaults to 'best_predictor_model.pt'.
 
     Returns:
-        dict: Checkpoint containing model_state_dict, optimizer_state_dict, metrics, and config.
+        tuple: (model, checkpoint dict)
     """
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Checkpoint not found at {model_path}")
-    
     checkpoint = torch.load(model_path, weights_only=False)
-    return checkpoint
 
+    model = ParameterPredictor(checkpoint['model_config'])
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
 
-def resume_npe_training(model, optimizer, model_path='best_npe_pycbc_model.pt', 
-                        train_params=None, train_data=None,
-                        n_epochs=50, **train_kwargs):
+    print(f"Loaded ParameterPredictor from {model_path}")
+    print(f"  Best epoch: {checkpoint['epoch'] + 1}")
+    print(f"  Best validation loss: {checkpoint['best_val_loss']:.4f}")
+
+    return model, checkpoint
+
+def load_npe(model_path='best_npe_model.pt', model_class=DINGOModel):
     """
-    Resume training from checkpoint.
+    Load saved NPE model checkpoint (NormalizingFlow or DINGOModel).
 
     Args:
-        model (nn.Module): Model to train
-        optimizer (torch.optim.Optimizer): Optimizer
-        model_path (str, optional): Path to checkpoint. Defaults to 'best_npe_pycbc_model.pt'.
-        train_params, train_data: Training data
-        n_epochs (int, optional): Additional epochs to train. Defaults to 50.
-        **train_kwargs: Additional arguments for train_npe_pycbc()
+        model_path (str, optional): Path to checkpoint. Defaults to 'best_npe_model.pt'.
+        model_class: NPE model class (DINGOModel or NormalizingFlow). Defaults to DINGOModel.
 
     Returns:
-        dict: Training results from continued training.
+        tuple: (model, checkpoint dict)
     """
-    checkpoint = load_npe_checkpoint(model_path)
-    
+    checkpoint = torch.load(model_path, weights_only=False)
+
+    model = model_class(config=checkpoint['model_config'])
     model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
-    start_epoch = checkpoint.get('epoch', 0) + 1
-    
-    print(f"Resumed training from epoch {start_epoch}\n")
-    
-    return train_npe_pycbc(
-        model, train_params, train_data,
-        n_epochs=n_epochs,
-        start_epoch=start_epoch,
-        model_path=model_path,
-        **train_kwargs
-    )
+    model.eval()
 
+    print(f"Loaded {model_class.__name__} from {model_path}")
+    print(f"  Best epoch: {checkpoint['epoch'] + 1}")
+    print(f"  Best validation log prob: {checkpoint['best_val_log_prob']:.4f}")
 
+    return model, checkpoint
 
-def create_dingo_from_data(dataloader_result, param_dim=None, context_dim=64,
+def create_dingo_from_data(metadata, param_dim=None, context_dim=64,
                            num_flow_layers=6, hidden_dim=128, multi_detector_mode='concatenate'):
     """
-    Create a DINGOModel with dimensions automatically inferred from dataloader metadata.
+    Create a DINGOModel with dimensions automatically inferred from metadata.
 
     Args:
-        dataloader_result: Result dict from pycbc_data_generator or load_dataloaders
+        metadata: Metadata dict from pycbc_data_generator or load_dataloaders result
         param_dim: Number of parameters to infer. If None, inferred from metadata
         context_dim: Context dimension. Defaults to 64
         num_flow_layers: Number of flow layers. Defaults to 6
@@ -1038,32 +1406,34 @@ def create_dingo_from_data(dataloader_result, param_dim=None, context_dim=64,
 
     Examples:
         >>> data = load_dataloaders('my_data.pt')
-        >>> model = create_dingo_from_data(data, context_dim=128, num_flow_layers=8)
+        >>> model = create_dingo_from_data(data['metadata'], context_dim=128, num_flow_layers=8)
     """
-    metadata = dataloader_result['metadata']
+    # Infer dimensions from metadata (waveform_shape is always present in new format)
+    if 'waveform_shape' not in metadata:
+        raise ValueError("Metadata missing 'waveform_shape'. This data may be from an old version.")
 
-    # Infer dimensions from metadata
-    if 'waveform_shape' in metadata:
-        # Format: (num_detectors, time_length)
-        num_detectors, data_dim = metadata['waveform_shape']
-    elif 'channels' in metadata and 'target_length' in metadata:
-        num_detectors = len(metadata['channels'])
-        data_dim = metadata['target_length']
-    else:
-        raise ValueError("Cannot infer data dimensions from metadata. Missing 'waveform_shape' or 'channels'/'target_length'")
+    # waveform_shape format: (num_detectors, time_length)
+    num_detectors, data_dim = metadata['waveform_shape']
 
+    # Infer param_dim from parameter_names if not specified
     if param_dim is None:
-        if 'parameter_names' in metadata:
-            param_dim = len(metadata['parameter_names'])
-        else:
+        if 'parameter_names' not in metadata:
             raise ValueError("Cannot infer param_dim from metadata. Please specify explicitly.")
+        param_dim = len(metadata['parameter_names'])
 
+    # Display inferred configuration
     print(f"Creating DINGOModel with inferred dimensions:")
     print(f"  data_dim (time length per detector): {data_dim}")
     print(f"  num_detectors: {num_detectors}")
     print(f"  param_dim: {param_dim}")
+    print(f"  Parameter names: {metadata.get('parameter_names', 'N/A')}")
+    print(f"  Detectors: {metadata.get('detectors', 'N/A')}")
+    print(f"  Signal length: {metadata.get('signal_length', 'N/A')}s")
+    print(f"  Time resolution: {metadata.get('time_resolution', 'N/A')}s")
+    print(f"\nModel architecture:")
     print(f"  context_dim: {context_dim}")
     print(f"  num_flow_layers: {num_flow_layers}")
+    print(f"  hidden_dim: {hidden_dim}")
     print(f"  multi_detector_mode: {multi_detector_mode}")
 
     model = DINGOModel(
@@ -1071,42 +1441,147 @@ def create_dingo_from_data(dataloader_result, param_dim=None, context_dim=64,
         param_dim=param_dim,
         context_dim=context_dim,
         num_flow_layers=num_flow_layers,
-        hidden_dim=hidden_dim
+        hidden_dim=hidden_dim,
+        num_detectors=num_detectors,
+        multi_detector_mode=multi_detector_mode
     )
 
     return model
 
-
-def npe_hyperparameter_search(param_grid, train_dloader, val_dloader=None, model_class=DINGOModel, 
-                               n_epochs=20, n_trials=None, model_path='best_npe_model.pt', 
-                               device='cuda', use_pycbc=True, config_save_path='best_config.json'):
+def predictor_hyperparameter_search(param_grid, train_loader, val_loader, n_epochs=20, n_trials=None, model_path='best_predictor_model.pt'):
     """
-    Hyperparameter search optimized for NPE models (DINGOModel with DataLoaders).
+    Search for best hyperparameter configuration.
 
     Args:
-        param_grid: Dict of parameter names to value lists. 
-            Can include: 'lr', 'grad_clip_norm', 'embedding', 'context_dim', 'num_flow_layers'
-        train_dloader: Training DataLoader yielding (params, data) tuples
-        val_dloader: Validation DataLoader (optional for early stopping). Defaults to None.
-        model_class: NPE model class. Defaults to DINGOModel.
+        param_grid: Dict of parameter names to value lists
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        n_epochs: Epochs per configuration. Defaults to 20.
+        n_trials: Random trials to try; None = all combinations. Defaults to None.
+        model_path: Path to save best model. Defaults to 'best_predictor_model.pt'.
+
+    Returns:
+        tuple: (best_config dict, results list)
+    """
+
+    results = []
+    best_val_loss = float('inf')
+    best_config = None
+
+    # Generate all combinations or sample randomly
+    param_names = list(param_grid.keys())
+    param_values = [param_grid[name] for name in param_names]
+
+    if n_trials is None:
+        # Try all combinations (grid search)
+        all_combinations = list(itertools.product(*param_values))
+    else:
+        # Random search: sample n_trials random combinations
+        all_combinations = []
+        for _ in range(n_trials):
+            combo = tuple(random.choice(values) for values in param_values)
+            all_combinations.append(combo)
+    
+    print(f"Testing {len(all_combinations)} configurations...\n")
+    
+    for i, combo in enumerate(all_combinations):
+        config = dict(zip(param_names, combo))
+
+        print(f"{'='*60}")
+        print(f"Trial {i+1}/{len(all_combinations)}")
+        print(f"Config: {config}")
+        print(f"{'='*60}")
+
+        model = ParameterPredictor(config)
+        lr = config.get('learning_rate', 0.01)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=2,
+            min_lr=1e-6,
+        )
+
+        loss_fcn = nn.MSELoss()
+
+        try:
+            outputs = train_predictor_model(
+                model,
+                optimizer,
+                loss_fcn,
+                n_epochs,
+                train_loader,
+                val_loader,
+                patience=8,
+                scheduler=scheduler,
+                save_best_model=False
+            )
+
+            final_val_loss = min(outputs['val_losses'])
+            final_val_metrics = outputs['val_metrics'][outputs['val_losses'].index(final_val_loss)]
+
+            result = {
+                'config': config.copy(),
+                'best_val_loss': final_val_loss,
+                'best_val_mae': final_val_metrics['mae'],
+                'best_val_rmse': final_val_metrics['rmse'],
+                'best_val_r2': final_val_metrics['r2'],
+                'n_epochs_trained': len(outputs['val_losses'])
+            }
+            results.append(result)
+
+            print(f"\nFinal validation loss: {final_val_loss:.4f}")
+            print(f"Best validation R²: {final_val_metrics['r2']:.4f}\n")
+
+            if final_val_loss < best_val_loss:
+                best_val_loss = final_val_loss
+                best_config = config.copy()
+                checkpoint = {
+                    'epoch': len(outputs['val_losses']) - 1,
+                    'model_state_dict': model.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'model_config': model.config if hasattr(model, 'config') else None,
+                    'train_losses': outputs['train_losses'],
+                    'val_losses': outputs['val_losses'],
+                    'train_metrics': outputs['train_metrics'],
+                    'val_metrics': outputs['val_metrics']
+                }
+                torch.save(checkpoint, model_path)
+                print(f"*** New best configuration found! ***\n")
+        
+        except Exception as e:
+            print(f"Error training with config {config}: {e}\n")
+            continue
+
+    print(f"\n{'='*60}")
+    print("HYPERPARAMETER SEARCH COMPLETE")
+    print(f"{'='*60}")
+    print(f"\nBest configuration:")
+    for key, value in best_config.items():
+        print(f"  {key}: {value}")
+    print(f"\nBest validation loss: {best_val_loss:.4f}")
+
+    results.sort(key=lambda x: x['best_val_loss'])
+    
+    return best_config, results
+
+def npe_hyperparameter_search(param_grid, train_loader, val_loader, model_class=DINGOModel, n_epochs=20, n_trials=None, model_path='best_npe_model.pt'):
+    """
+    Hyperparameter search optimized for NPE models (NormalizingFlow, DINGOModel).
+
+    Args:
+        param_grid: Dict of parameter names to value lists
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        model_class: NPE model class (DINGOModel or NormalizingFlow). Defaults to DINGOModel.
         n_epochs: Epochs per configuration. Defaults to 20.
         n_trials: Random trials to try; None = all combinations. Defaults to None.
         model_path: Path to save best model. Defaults to 'best_npe_model.pt'.
-        device: Device ('cuda' or 'cpu'). Defaults to 'cuda'.
-        use_pycbc: Use train_npe_pycbc (True) or train_npe_model (False). Defaults to True.
-        config_save_path: Path to save best configuration as JSON. Defaults to 'best_config.json'.
 
     Returns:
         tuple: (best_config dict, results list sorted by validation log prob)
-    
-    Example:
-        >>> param_grid = {
-        ...     'lr': [1e-4, 5e-4, 1e-3],
-        ...     'embedding': ['linear', 'conv1d'],
-        ...     'context_dim': [64, 128],
-        ...     'num_flow_layers': [4, 6]
-        ... }
-        >>> best_config, results = npe_hyperparameter_search(param_grid, train_loader, val_loader)
     """
     results = []
     best_val_log_prob = float('-inf')
@@ -1126,8 +1601,7 @@ def npe_hyperparameter_search(param_grid, train_dloader, val_dloader=None, model
             combo = tuple(random.choice(values) for values in param_values)
             all_combinations.append(combo)
 
-    print(f"\nTesting {len(all_combinations)} configurations with {model_class.__name__}...")
-    print(f"Training mode: {'train_npe_pycbc' if use_pycbc else 'train_npe_model'}\n")
+    print(f"Testing {len(all_combinations)} configurations with {model_class.__name__}...\n")
 
     for i, combo in enumerate(all_combinations):
         config = dict(zip(param_names, combo))
@@ -1135,154 +1609,73 @@ def npe_hyperparameter_search(param_grid, train_dloader, val_dloader=None, model
         print(f"{'='*60}")
         print(f"Trial {i+1}/{len(all_combinations)}")
         print(f"Config: {config}")
-        print(f"{'='*70}")
+        print(f"{'='*60}")
+
+        model = model_class(config=config)
+        lr = config.get('learning_rate', 0.001)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='max',
+            factor=0.5,
+            patience=2,
+            min_lr=1e-7,
+        )
+
+        grad_clip_norm = config.get('grad_clip_norm', 5.0)
+        dropout_rate = config.get('dropout_rate', None)
 
         try:
-            # Extract hyperparameters from config
-            lr = config.pop('lr', 1e-4)
-            grad_clip_norm = config.pop('grad_clip_norm', 5.0)
-            embedding = config.pop('embedding', 'linear')
-            context_dim = config.pop('context_dim', 64)
-            num_flow_layers = config.pop('num_flow_layers', 6)
-            hidden_dim = config.pop('hidden_dim', 128)
-            
-            # Extract regularization parameters if provided
-            reg_target_std = config.pop('reg_target_std', 0.8)
-            reg_max_weight = config.pop('reg_max_weight', 1.0)
-            reg_warmup_epochs = config.pop('reg_warmup_epochs', 15)
-            reg_config = {
-                'target_std': reg_target_std,
-                'max_weight': reg_max_weight,
-                'warmup_epochs': reg_warmup_epochs
-            }
-            
-            # Create model with remaining config parameters
-            model = model_class(
-                context_dim=context_dim,
-                num_flow_layers=num_flow_layers,
-                hidden_dim=hidden_dim,
-                embedding=embedding
+            outputs = train_npe_model(
+                model,
+                optimizer,
+                n_epochs,
+                train_loader,
+                val_loader,
+                patience=8,
+                scheduler=scheduler,
+                grad_clip_norm=grad_clip_norm,
+                dropout_rate=dropout_rate,
+                save_best_model=False
             )
-            
-            # Setup optimizer and scheduler
-            optimizer_type = config.pop('optimizer', 'adam').lower()
-            if optimizer_type == 'adamw':
-                optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-            elif optimizer_type == 'sgd':
-                optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-            else:
-                optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-            
-            # Optional learning rate scheduler
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=n_epochs, eta_min=lr * 0.01
-            ) if val_dloader else None
 
-            if use_pycbc:
-                # Use train_npe_pycbc (more modern, with DataLoaders)
-                outputs = train_npe_pycbc(
-                    model,
-                    train_dloader,
-                    val_dloader=val_dloader,
-                    n_epochs=n_epochs,
-                    lr=lr,
-                    optimizer=optimizer_type,
-                    scheduler=scheduler,
-                    grad_clip_norm=grad_clip_norm,
-                    device=device,
-                    reg_config=reg_config,
-                    save_best_model=False,
-                    verbose=False
-                )
-                
-                if outputs['val_log_probs']:
-                    final_val_log_prob = max(outputs['val_log_probs'])
-                else:
-                    # If no validation, use final training log prob
-                    final_val_log_prob = outputs['train_log_probs'][-1]
-                
-                result = {
-                    'config': config.copy(),
-                    'best_val_log_prob': final_val_log_prob,
-                    'n_epochs_trained': len(outputs['train_log_probs']),
-                    'final_train_log_prob': outputs['train_log_probs'][-1]
-                }
-            else:
-                # Alternative: use training log prob if no validation available
-                outputs = train_npe_pycbc(
-                    model,
-                    train_dloader,
-                    val_dloader=None,
-                    n_epochs=n_epochs,
-                    lr=lr,
-                    optimizer=optimizer_type,
-                    scheduler=None,
-                    grad_clip_norm=grad_clip_norm,
-                    device=device,
-                    reg_config=reg_config,
-                    save_best_model=False,
-                    verbose=False
-                )
-                
-                final_val_log_prob = outputs['train_log_probs'][-1]
-                
-                result = {
-                    'config': config.copy(),
-                    'best_val_log_prob': final_val_log_prob,
-                    'n_epochs_trained': len(outputs['train_log_probs']),
-                    'final_train_log_prob': outputs['train_log_probs'][-1]
-                }
-            
+            final_val_log_prob = max(outputs['val_log_probs'])
+
+            result = {
+                'config': config.copy(),
+                'best_val_log_prob': final_val_log_prob,
+                'n_epochs_trained': len(outputs['val_log_probs'])
+            }
             results.append(result)
-            
-            print(f"Final validation log prob: {final_val_log_prob:.4f}")
-            print(f"Final training log prob: {result['final_train_log_prob']:.4f}\n")
+
+            print(f"\nFinal validation log prob: {final_val_log_prob:.4f}\n")
 
             if final_val_log_prob > best_val_log_prob:
                 best_val_log_prob = final_val_log_prob
-                best_config = {'lr': lr, 'grad_clip_norm': grad_clip_norm, 'embedding': embedding,
-                              'context_dim': context_dim, 'num_flow_layers': num_flow_layers,
-                              'hidden_dim': hidden_dim, 'reg_target_std': reg_target_std,
-                              'reg_max_weight': reg_max_weight, 'reg_warmup_epochs': reg_warmup_epochs,
-                              **config}
-                
-                # Save best model checkpoint
+                best_config = config.copy()
                 checkpoint = {
-                    'epoch': result['n_epochs_trained'] - 1,
+                    'epoch': len(outputs['val_log_probs']) - 1,
                     'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
                     'best_val_log_prob': best_val_log_prob,
                     'model_config': model.config if hasattr(model, 'config') else None,
                     'train_log_probs': outputs['train_log_probs'],
-                    'val_log_probs': outputs.get('val_log_probs', [])
+                    'val_log_probs': outputs['val_log_probs']
                 }
                 torch.save(checkpoint, model_path)
-                print(f"New best configuration found!\n")
+                print(f"*** New best configuration found! ***\n")
 
         except Exception as e:
-            print(f"✗ Error training with config {config}: {e}\n")
-            import traceback
-            traceback.print_exc()
+            print(f"Error training with config {config}: {e}\n")
             continue
 
     print(f"\n{'='*60}")
     print("NPE HYPERPARAMETER SEARCH COMPLETE")
-    print(f"{'='*70}\n")
-    
-    if best_config:
-        print(f"Best configuration:")
-        for key, value in best_config.items():
-            print(f"  {key}: {value}")
-        print(f"\nBest validation log prob: {best_val_log_prob:.4f}\n")
-        
-        # Save best config to JSON file
-        import json
-        config_to_save = best_config.copy()
-        with open(config_save_path, 'w') as f:
-            json.dump(config_to_save, f, indent=2)
-        print(f"Best configuration saved to {config_save_path}\n")
-    else:
-        print("No successful trials completed.\n")
+    print(f"{'='*60}")
+    print(f"\nBest configuration:")
+    for key, value in best_config.items():
+        print(f"  {key}: {value}")
+    print(f"\nBest validation log prob: {best_val_log_prob:.4f}")
 
     results.sort(key=lambda x: x['best_val_log_prob'], reverse=True)
 
@@ -1322,52 +1715,3 @@ def infer_NPE(model, observed_data, num_samples=5000):
         statistics = None
     
     return samples, statistics
-
-def prepare_pycbc_data():
-    config = {
-        'mass1': lambda size: np.random.uniform(10, 50, size=size),
-        'mass2': lambda size: np.random.uniform(10, 50, size=size),
-        'spin1z': lambda size: np.random.uniform(-0.5, 0.5, size=size),
-    }
-
-    # Generate with H1 only
-    result = data_generator.pycbc_data_generator(
-        config, 
-        num_samples=10000, 
-        batch_size=16, 
-        num_workers=4,
-        allow_padding=True,
-        normalize_waveforms=True,
-        detectors=['H1']
-    )
-
-    # Access the loaders
-    train_loader = result['train_loader']
-    val_loader = result['val_loader']
-    test_loader = result['test_loader']
-
-    return train_loader, val_loader, test_loader
-
-train_dloader, val_dloader, test_dloader = prepare_pycbc_data()
-
-
-param_grid = {
-    'lr': [1e-4, 5e-4, 1e-3],
-    'embedding': ['linear', 'conv1d'],
-    'context_dim': [64, 128, 256, 512],
-    'num_flow_layers': [4, 6, 8, 10, 12, 14, 16],
-    'hidden_dim': [128, 256, 512],
-    'optimizer': ['adam'],
-    'grad_clip_norm': [1.0, 5.0, 10.0],
-    'reg_target_std': [0.5, 0.8, 1.0],
-    'reg_max_weight': [0.5, 1.0, 2.0],
-    'reg_warmup_epochs': [10, 15, 20]
-}
-
-best_config, results = npe_hyperparameter_search(
-    param_grid, 
-    train_dloader, 
-    val_dloader=val_dloader,
-    n_epochs=30,
-    n_trials=500  # search through (500) ALL THE COMBINATIONS!!!!!
-)

@@ -1,0 +1,42 @@
+Loading Python/3.11.3-GCCcore-12.3.0
+  Loading requirement: GCCcore/12.3.0 zlib/1.2.13-GCCcore-12.3.0
+    binutils/2.40-GCCcore-12.3.0 bzip2/1.0.8-GCCcore-12.3.0
+    ncurses/6.4-GCCcore-12.3.0 libreadline/8.2-GCCcore-12.3.0
+    Tcl/8.6.13-GCCcore-12.3.0 SQLite/3.42.0-GCCcore-12.3.0
+    XZ/5.4.2-GCCcore-12.3.0 libffi/3.4.4-GCCcore-12.3.0 OpenSSL/1.1
+Starting waveform generation test...
+
+Generating 10 test waveforms...
+Generating 10 waveforms with projection to ['H1', 'L1']
+  Using default sky location: ra=0.0, dec=π/2 (north pole), psi=0.0
+Target signal length: 8192 samples (2.0s at 0.000244140625s resolution)
+Generating waveforms:   0%|          | 0/10 [00:00<?, ?it/s]Generating waveforms:  10%|█         | 1/10 [00:00<00:02,  4.03it/s]Generating waveforms: 100%|██████████| 10/10 [00:00<00:00, 40.18it/s]
+
+Generation complete: 10 successful, 0 failed
+
+Processing 10 waveforms...
+  Detector channels: ['H1', 'L1']
+  All signals fixed to: 8192 samples (2.0s)
+  Extracting signals and parameters...
+  Converting to PyTorch tensors...
+  Tensors: X=torch.Size([10, 2, 8192]), y=torch.Size([10, 3])
+  Splits: train=8, val=1, test=1
+
+Ready! DataLoaders with batch_size=256
+
+Generation complete!
+Metadata: {'parameter_names': ['mass1', 'mass2', 'spin1z'], 'num_samples': 10, 'num_failed': 0, 'waveform_shape': (2, 8192), 'channels': ['H1', 'L1'], 'train_size': 8, 'val_size': 1, 'test_size': 1, 'batch_size': 256, 'time_resolution': 0.000244140625, 'approximant': 'IMRPhenomXP', 'f_lower': 40.0, 'detectors': ['H1', 'L1'], 'target_length': 8192, 'signal_length': 2.0, 'chunk_size': 10000, 'sky_params_provided': {'ra': False, 'dec': False, 'polarization': False}}
+
+Batch shapes:
+  X (signals): torch.Size([8, 2, 8192])
+  y (parameters): torch.Size([8, 3])
+
+First waveform:
+  Shape: torch.Size([2, 8192])
+  Parameters: tensor([32.6944, 34.9618,  0.2836])
+  Parameter names: ['mass1', 'mass2', 'spin1z']
+
+Figure saved as 'test_waveform.png'
+Zoomed figure saved as 'test_waveform_zoom.png'
+
+=== Test completed successfully! ===

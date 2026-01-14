@@ -1,3 +1,4 @@
-__pycache__/
-CLAUDE.md
-/.claude
+HPC/data_no_noise.pt
+HPC/data_noise.pt
+HPC/best_dingo_model_no_noise.pt
+HPC/best_dingo_model.pt

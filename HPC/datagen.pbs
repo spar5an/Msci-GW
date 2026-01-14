@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -N datagen
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=16:mem=128gb
+#PBS -j oe
+
+module purge
+
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+
+source /rds/general/user/jc5322/home/venv/pycbcenv/bin/activate
+
+cd "$PBS_O_WORKDIR"
+
+python datagen.py
