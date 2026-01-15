@@ -889,5 +889,5 @@ ax5.text(0.1, 0.5, info_text, fontsize=10, family='monospace',
          facecolor='lightgreen', alpha=0.3))
 
 plt.tight_layout()
-plt.savefig('/workspace/multi_detector_npe_results.png', dpi=150, bbox_inches='tight')
+plt.savefig('multi_detector_npe_results.png', dpi=150, bbox_inches='tight')
 plt.close()

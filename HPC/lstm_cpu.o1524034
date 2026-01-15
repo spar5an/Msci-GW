@@ -1,0 +1,27 @@
+=== Running lstm ===
+Loading datasets from data_noise.pt...
+  Tensors: X=torch.Size([40000, 2, 8192]), y=torch.Size([40000, 3])
+  Splits: train=32000, val=4000, test=4000
+
+Ready! DataLoaders with batch_size=256
+Creating DINGOModel: data_dim=8192, param_dim=3, context_dim=64, num_flow_layers=6
+Traceback (most recent call last):
+  File "/rds/general/user/jc5322/home/new_msci/Msci-GW/HPC/lstm_rebuild.py", line 359, in <module>
+    model = create_dingo_from_data(output)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/rds/general/user/jc5322/home/new_msci/Msci-GW/HPC/lstm_rebuild.py", line 347, in create_dingo_from_data
+    model = DINGOModelLSTM(data_dim=data_dim, param_dim=param_dim,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/rds/general/user/jc5322/home/new_msci/Msci-GW/HPC/lstm_rebuild.py", line 302, in __init__
+    self.embedding_net = LSTMEmbeddingNetwork(data_dim, context_dim, 256, 2, num_detectors=num_detectors)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: LSTMEmbeddingNetwork.__init__() got multiple values for argument 'num_detectors'
+
+====================================
+CPU Time used: 00:00:08
+CPU Percent: 18%
+Memory usage: 487140kb
+Approx Power usage: 0.0
+Walltime usage: 00:00:56
+
+====================================

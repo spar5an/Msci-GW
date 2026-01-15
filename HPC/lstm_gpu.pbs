@@ -18,4 +18,4 @@ echo "=== Testing it has a GPU ==="
 python -c "import torch; print(torch.cuda.is_available())"
 
 echo "=== Running lstm ==="
-python lstm_rebuild_gpu.py
+python lstm_rebuild_GPU.py

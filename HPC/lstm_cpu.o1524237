@@ -1,0 +1,22 @@
+=== Running lstm ===
+Loading datasets from data_noise.pt...
+  Tensors: X=torch.Size([40000, 2, 8192]), y=torch.Size([40000, 3])
+  Splits: train=32000, val=4000, test=4000
+
+Ready! DataLoaders with batch_size=256
+Traceback (most recent call last):
+  File "/rds/general/user/jc5322/home/new_msci/Msci-GW/HPC/lstm_rebuild.py", line 361, in <module>
+    model = create_dingo_from_data(output)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/rds/general/user/jc5322/home/new_msci/Msci-GW/HPC/JHPY.py", line 1419, in create_dingo_from_data
+    raise ValueError("Metadata missing 'waveform_shape'. This data may be from an old version.")
+ValueError: Metadata missing 'waveform_shape'. This data may be from an old version.
+
+====================================
+CPU Time used: 00:00:00
+CPU Percent: 0%
+Memory usage: 0b
+Approx Power usage: 0.0
+Walltime usage: 00:00:57
+
+====================================
