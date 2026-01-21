@@ -21,6 +21,7 @@ from pycbc.psd import aLIGOZeroDetHighPower
 from pycbc.noise import noise_from_psd
 from pycbc.types import TimeSeries
 from torch.utils.data import Subset
+import warnings
 
 
 
@@ -259,7 +260,14 @@ def pycbc_data_generator(config: Dict[str, Callable],
                         val_split: float = 0.1,
                         show_progress: bool = True,
                         detectors: List[str] = None,
-                        add_noise: bool = True) -> Dict:
+                        add_noise: bool = True,
+                        whiten: bool = False,
+                        whiten_bandpass: bool = True,
+                        whiten_crop_edges: bool = False,
+                        whiten_crop_samples: int = 100,
+                        normalize: bool = False,
+                        normalize_scale: float = 100.0,
+                        resample_rate: float = None) -> Dict:
     """
     Generate PyCBC waveforms projected to detectors.
     Returns PyTorch DataLoaders for training, validation, and testing.
@@ -306,6 +314,26 @@ def pycbc_data_generator(config: Dict[str, Callable],
         Detector names. Default: ['H1', 'L1']
     add_noise : bool
         Whether to add detector noise to signals. Default: True
+    whiten : bool
+        Apply PSD-based whitening to signals. Default: False
+    whiten_bandpass : bool
+        Apply 35-300 Hz bandpass filter after whitening. Default: True
+        Only used if whiten=True
+    whiten_crop_edges : bool
+        Remove edge samples to eliminate filter transients. Default: True
+        Only used if whiten=True and whiten_bandpass=True
+    whiten_crop_samples : int
+        Number of samples to crop from each edge. Default: 100
+        At 4096 Hz, 100 samples = ~0.024 seconds
+        Only used if whiten_crop_edges=True
+    normalize : bool
+        Apply fixed-scale normalization to signals. Default: False
+    normalize_scale : float
+        Fixed scaling factor for normalization. Default: 100.0
+        Critical: Use FIXED scale to preserve relative amplitudes for LSTM training
+    resample_rate : float, optional
+        Target sampling rate in Hz for resampling. If None, no resampling.
+        Default: None
 
     Returns
     -------
@@ -326,6 +354,17 @@ def pycbc_data_generator(config: Dict[str, Callable],
         raise ValueError("train_split and val_split must be between 0 and 1")
     if train_split + val_split >= 1:
         raise ValueError("train_split + val_split must be < 1")
+
+    # Validate preprocessing parameters
+    if whiten and not add_noise:
+        warnings.warn("Whitening without noise may produce unrealistic PSDs")
+    if normalize and normalize_scale <= 0:
+        raise ValueError("normalize_scale must be positive")
+    if resample_rate is not None:
+        original_rate = 1.0 / time_resolution
+        if resample_rate > original_rate:
+            warnings.warn(f"Upsampling from {original_rate}Hz to {resample_rate}Hz - "
+                         "this does not add information")
     
     if num_workers is None:
         num_workers = 1
@@ -405,8 +444,18 @@ def pycbc_data_generator(config: Dict[str, Callable],
     print(f"  Detector channels: {detector_names}")
     print(f"  All signals fixed to: {target_length} samples ({signal_length}s)")
 
+    # Compute final length accounting for resampling
+    target_length_samples = target_length
+    if resample_rate is not None:
+        original_rate = 1.0 / time_resolution
+        target_delta_t = 1.0 / resample_rate
+        original_length_seconds = target_length * time_resolution
+        target_length_samples = int(original_length_seconds / target_delta_t)
+        print(f"  Resampling enabled: {original_rate}Hz → {resample_rate}Hz")
+        print(f"  Final length: {target_length_samples} samples")
+
     # Pre-allocate arrays (all signals are already at target_length)
-    signal_array = np.empty((num_success, num_detectors, target_length), dtype=np.float32)
+    signal_array = np.empty((num_success, num_detectors, target_length_samples), dtype=np.float32)
     param_array = np.empty((num_success, num_params), dtype=np.float32)
 
     print(f"  Extracting signals and parameters...")
@@ -421,6 +470,53 @@ def pycbc_data_generator(config: Dict[str, Callable],
         for k, det_name in enumerate(detector_names):
             # TimeSeries objects support array protocol, direct assignment is efficient
             signal_array[i, k, :] = waveform_data['detectors'][det_name]
+
+    # Apply preprocessing pipeline if requested
+    if whiten or normalize or resample_rate:
+        from data_generator import whiten_waveform, normalize_waveform, resample_waveform
+
+        print(f"  Applying preprocessing pipeline...")
+        if whiten:
+            crop_info = f", crop_edges={whiten_crop_edges}" if whiten_bandpass else ""
+            if whiten_bandpass and whiten_crop_edges:
+                crop_info += f" ({whiten_crop_samples} samples)"
+            print(f"    - Whitening (f_lower={f_lower}Hz, bandpass={whiten_bandpass}{crop_info})")
+        if normalize:
+            print(f"    - Normalizing (scale={normalize_scale})")
+        if resample_rate:
+            print(f"    - Resampling to {resample_rate}Hz")
+
+        # Process each sample and detector
+        for i in range(signal_array.shape[0]):
+            for j in range(signal_array.shape[1]):
+                waveform = signal_array[i, j, :]
+
+                # Step 1: Whiten (if enabled)
+                if whiten:
+                    whitened, _, _ = whiten_waveform(
+                        waveform,
+                        delta_t=time_resolution,
+                        f_lower=f_lower,
+                        apply_bandpass=whiten_bandpass,
+                        crop_edges=whiten_crop_edges,
+                        crop_samples=whiten_crop_samples
+                    )
+                    waveform = whitened
+
+                # Step 2: Normalize (if enabled)
+                if normalize:
+                    waveform = normalize_waveform(waveform, scale_factor=normalize_scale)
+
+                # Step 3: Resample (if enabled)
+                if resample_rate:
+                    target_delta_t = 1.0 / resample_rate
+                    waveform = resample_waveform(
+                        waveform,
+                        original_delta_t=time_resolution,
+                        target_delta_t=target_delta_t
+                    )
+
+                signal_array[i, j, :] = waveform
 
     print(f"  Converting to PyTorch tensors...")
 
@@ -473,6 +569,17 @@ def pycbc_data_generator(config: Dict[str, Callable],
             'chunk_size': chunk_size,
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
+            'preprocessing': {
+                'whitened': whiten,
+                'whiten_f_lower': f_lower if whiten else None,
+                'whiten_bandpass': whiten_bandpass if whiten else None,
+                'normalized': normalize,
+                'normalize_scale': normalize_scale if normalize else None,
+                'resampled': resample_rate is not None,
+                'original_rate': 1.0 / time_resolution if resample_rate else None,
+                'resample_rate': resample_rate,
+                'final_length_samples': target_length_samples,
+            }
         }
     }
 
@@ -592,6 +699,163 @@ def load_dataloaders(load_path: str, batch_size: int = None, shuffle_train: bool
         'test_loader': test_loader,
         'metadata': metadata
     }
+
+def resample_dataloaders(result: Dict,
+                        target_sample_rate: float,
+                        batch_size: int = None,
+                        preserve_splits: bool = True) -> Dict:
+    """
+    Resample all waveforms in a DataLoader result to a different sampling rate.
+
+    This function extracts waveforms from existing DataLoaders, resamples them
+    using PyCBC's anti-aliasing resample function, and repackages them into
+    new DataLoaders with updated metadata.
+
+    Parameters
+    ----------
+    result : dict
+        Result dictionary from pycbc_data_generator() or load_dataloaders()
+        Must contain 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    target_sample_rate : float
+        Target sampling rate in Hz (e.g., 2048 for downsampling from 4096)
+    batch_size : int, optional
+        Batch size for new DataLoaders. If None, uses original batch_size
+    preserve_splits : bool
+        If True, maintains original train/val/test splits. Default: True
+
+    Returns
+    -------
+    dict
+        New DataLoader result with resampled data, same structure as input
+
+    Examples
+    --------
+    >>> # Generate data at 4096 Hz
+    >>> result = pycbc_data_generator(config, num_samples=1000)
+    >>> # Resample to 2048 Hz
+    >>> result_2048 = resample_dataloaders(result, target_sample_rate=2048)
+    >>> # Or load from disk and resample
+    >>> loaded = load_dataloaders('data.pt')
+    >>> resampled = resample_dataloaders(loaded, target_sample_rate=1024)
+    """
+    from data_generator import resample_waveform
+
+    # Extract metadata
+    metadata = result['metadata'].copy()
+    original_delta_t = metadata['time_resolution']
+    original_rate = 1.0 / original_delta_t
+    target_delta_t = 1.0 / target_sample_rate
+
+    print(f"Resampling DataLoaders from {original_rate:.0f} Hz to {target_sample_rate:.0f} Hz...")
+
+    # Extract indices from Subsets
+    train_dataset = result['train_loader'].dataset
+    val_dataset = result['val_loader'].dataset
+    test_dataset = result['test_loader'].dataset
+
+    # Get base dataset (unwrap from Subset)
+    base_dataset = train_dataset.dataset
+    X_full = base_dataset.tensors[0]  # (N, num_detectors, time_length)
+    y_full = base_dataset.tensors[1]  # (N, num_params)
+
+    # Get split indices
+    train_indices = train_dataset.indices
+    val_indices = val_dataset.indices
+    test_indices = test_dataset.indices
+
+    # Compute new length
+    num_samples = X_full.shape[0]
+    num_detectors = X_full.shape[1]
+    original_length = X_full.shape[2]
+    original_duration = original_length * original_delta_t
+    new_length = int(original_duration / target_delta_t)
+
+    print(f"  Processing {num_samples} waveforms...")
+    print(f"  Original: {original_length} samples/waveform")
+    print(f"  New: {new_length} samples/waveform")
+
+    # Pre-allocate new tensor
+    X_resampled = torch.zeros(num_samples, num_detectors, new_length, dtype=torch.float32)
+
+    # Resample all waveforms
+    for i in range(num_samples):
+        for j in range(num_detectors):
+            # Extract waveform as numpy array
+            waveform = X_full[i, j, :].numpy()
+
+            # Resample using PyCBC
+            resampled = resample_waveform(
+                waveform,
+                original_delta_t=original_delta_t,
+                target_delta_t=target_delta_t
+            )
+
+            # Store back in tensor
+            X_resampled[i, j, :] = torch.from_numpy(resampled)
+
+    print(f"  Resampling complete!")
+
+    # Create new dataset
+    new_dataset = TensorDataset(X_resampled, y_full)
+
+    # Create subsets with preserved indices
+    if preserve_splits:
+        train_data = Subset(new_dataset, train_indices)
+        val_data = Subset(new_dataset, val_indices)
+        test_data = Subset(new_dataset, test_indices)
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+    else:
+        # Re-split with same proportions
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+        train_data, val_data, test_data = random_split(
+            new_dataset, [train_size, val_size, test_size]
+        )
+
+    # Determine batch size
+    if batch_size is None:
+        batch_size = metadata.get('batch_size', 256)
+
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+
+    # Update metadata to reflect resampling
+    new_metadata = metadata.copy()
+    new_metadata['time_resolution'] = target_delta_t
+    new_metadata['waveform_shape'] = (num_detectors, new_length)
+    new_metadata['target_length'] = new_length
+    new_metadata['batch_size'] = batch_size
+    new_metadata['train_size'] = train_size
+    new_metadata['val_size'] = val_size
+    new_metadata['test_size'] = test_size
+
+    # Update preprocessing info
+    if 'preprocessing' not in new_metadata:
+        new_metadata['preprocessing'] = {}
+
+    new_metadata['preprocessing'] = new_metadata['preprocessing'].copy()
+    new_metadata['preprocessing']['resampled'] = True
+    new_metadata['preprocessing']['original_rate'] = original_rate
+    new_metadata['preprocessing']['resample_rate'] = target_sample_rate
+    new_metadata['preprocessing']['final_length_samples'] = new_length
+
+    print(f"\nNew DataLoaders created:")
+    print(f"  Sampling rate: {target_sample_rate:.0f} Hz")
+    print(f"  Waveform shape: {new_metadata['waveform_shape']}")
+    print(f"  Batch size: {batch_size}")
+
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': new_metadata
+    }
+
 ################### Neural Network Layers ###################
 
 class AffineCouplingLayer(nn.Module):
