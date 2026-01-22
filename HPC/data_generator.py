@@ -61,7 +61,7 @@ def normalize_waveform(waveform, scale_factor=1e21):
 
 
 def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
-                    crop_edges=True, crop_samples=100):
+                    apply_tukey=True, tukey_alpha=0.1, tukey_side='left'):
     """
     Whiten a single waveform using PSD-based whitening.
 
@@ -69,12 +69,12 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     https://pycbc.org/pycbc/latest/html/gw150914.html
 
     The whitening process:
-    1. Compute PSD using Welch's method
-    2. Interpolate PSD to smooth frequency grid
-    3. Divide frequency-domain data by sqrt(PSD)
-    4. Convert back to time domain
-    5. Optionally apply bandpass filter (35-300 Hz)
-    6. Optionally crop edge samples to remove filter transients
+    1. Optionally apply Tukey window to prevent edge effects
+    2. Compute PSD using Welch's method
+    3. Interpolate PSD to smooth frequency grid
+    4. Divide frequency-domain data by sqrt(PSD)
+    5. Convert back to time domain
+    6. Optionally apply bandpass filter (35-300 Hz)
 
     Parameters
     ----------
@@ -86,17 +86,22 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
         Lower frequency cutoff in Hz (default: 20.0)
     apply_bandpass : bool, optional
         Apply bandpass filter 35-300 Hz (default: True)
-    crop_edges : bool, optional
-        Remove edge samples to eliminate filter transients (default: True)
-        Only applied when apply_bandpass=True
-    crop_samples : int, optional
-        Number of samples to crop from each edge (default: 100)
-        At 4096 Hz, 100 samples = ~0.024 seconds
+    apply_tukey : bool, optional
+        Apply Tukey window before whitening to prevent edge effects (default: True)
+        Smoothly tapers signal edges to zero, eliminating filter ringing
+    tukey_alpha : float, optional
+        Tukey window alpha parameter - fraction of signal to taper (default: 0.1)
+        0.1 means 5% tapered on each edge, 90% flat in middle
+    tukey_side : str, optional
+        Which side(s) to apply the Tukey taper (default: 'left')
+        - 'left': Only taper the beginning (preserves merger at end)
+        - 'right': Only taper the end
+        - 'both': Taper both sides (standard Tukey window)
 
     Returns
     -------
     whitened : np.ndarray
-        Whitened waveform as numpy array
+        Whitened waveform as numpy array (same length as input)
     psd : np.ndarray
         Power spectral density used for whitening
     freqs : np.ndarray
@@ -104,35 +109,58 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
 
     Notes
     -----
-    Edge cropping removes filter transients that cause amplitude spikes at the
-    start and end of the whitened signal. This is especially important for
-    machine learning applications where these artifacts could confuse the model.
-    The merger signal is typically centered in the waveform, so cropping edges
-    has minimal impact on the physical signal.
+    Edge effects (amplitude spikes at start/end) are caused by FIR filter
+    transients from the bandpass filter. The Tukey window prevents these by
+    smoothly tapering the signal edges to zero before processing, eliminating
+    the discontinuities that cause filter ringing.
+
+    For GW signals where the merger is at the end of the waveform, use
+    tukey_side='left' to only taper the beginning and preserve the merger.
+
+    The output length always matches the input length.
 
     Examples
     --------
     >>> waveform = np.random.randn(8192)
     >>> whitened, psd, freqs = whiten_waveform(waveform, delta_t=1/4096)
-    >>> print(f"Input shape: {waveform.shape}, Output shape: {whitened.shape}")
-    Input shape: (8192,), Output shape: (7992,)
+    >>> print(f"Input: {waveform.shape}, Output: {whitened.shape}")
+    Input: (8192,), Output: (8192,)
 
-    >>> # Disable edge cropping to preserve original length
-    >>> whitened, psd, freqs = whiten_waveform(waveform, crop_edges=False)
-    >>> print(f"Output shape: {whitened.shape}")
-    Output shape: (8192,)
+    >>> # Taper only the beginning (preserve merger at end)
+    >>> whitened, psd, freqs = whiten_waveform(waveform, tukey_side='left')
+
+    >>> # Disable Tukey window (will have edge effects)
+    >>> whitened, psd, freqs = whiten_waveform(waveform, apply_tukey=False)
     """
-    # Convert to TimeSeries if needed
+    from scipy.signal.windows import tukey
+    # Convert to numpy array if TimeSeries
     if isinstance(waveform, TimeSeries):
-        strain = waveform
+        data = np.array(waveform)
     else:
         data = np.array(waveform)
         if data.ndim != 1:
             raise ValueError(f"Expected 1D array, got shape {data.shape}")
-        strain = TimeSeries(data, delta_t=delta_t)
+
+    # Convert to TimeSeries
+    strain = TimeSeries(data, delta_t=delta_t)
 
     # Compute PSD using Welch method (PyCBC tutorial approach)
-    psd_welch = welch(strain)
+    # Adjust segment length for short signals - need at least 2 segments
+    n_samples = len(strain)
+    if n_samples >= 4096:
+        # Default: use 4096 sample segments
+        seg_len = 4096
+        seg_stride = 2048
+    elif n_samples >= 1024:
+        # Short signals: use smaller segments (1/4 of signal length)
+        seg_len = max(256, n_samples // 4)
+        seg_stride = seg_len // 2
+    else:
+        # Very short signals: use minimal segments
+        seg_len = max(64, n_samples // 4)
+        seg_stride = seg_len // 2
+
+    psd_welch = welch(strain, seg_len=seg_len, seg_stride=seg_stride)
 
     # Interpolate to smooth frequency grid
     psd = interpolate(psd_welch, 1.0 / strain.duration)
@@ -154,6 +182,32 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     # Whiten: divide by sqrt(PSD) in frequency domain
     white_strain = (freq_series / (psd_safe ** 0.5)).to_timeseries()
 
+    # Apply Tukey window BEFORE bandpass filtering to prevent edge effects
+    # The window tapers the whitened signal to zero at edges, preventing
+    # the FIR filter from ringing at discontinuities
+    if apply_tukey and apply_bandpass:
+        n = len(white_strain)
+        if tukey_side == 'both':
+            # Standard symmetric Tukey window
+            window = tukey(n, alpha=tukey_alpha)
+        elif tukey_side == 'left':
+            # Only taper the beginning - create half Tukey window
+            # Use a full Tukey window but only take the left taper + flat portion
+            full_window = tukey(n, alpha=tukey_alpha * 2)  # Double alpha since we only use half
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[:taper_len] = full_window[:taper_len]
+        elif tukey_side == 'right':
+            # Only taper the end - create half Tukey window
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[-taper_len:] = full_window[-taper_len:]
+        else:
+            raise ValueError(f"tukey_side must be 'left', 'right', or 'both', got '{tukey_side}'")
+
+        white_strain = TimeSeries(np.array(white_strain) * window, delta_t=delta_t)
+
     # Apply optional bandpass filtering
     if apply_bandpass:
         white_strain = highpass_fir(white_strain, 35, 8)
@@ -161,25 +215,14 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
 
     # Prepare outputs
     whitened = np.array(white_strain)
-
-    # Crop edges to remove filter transients (if bandpass was applied and crop_edges=True)
-    if apply_bandpass and crop_edges:
-        if len(whitened) > 2 * crop_samples:
-            whitened = whitened[crop_samples:-crop_samples]
-        else:
-            # If waveform is too short to crop, issue a warning but don't crop
-            import warnings
-            warnings.warn(f"Waveform length ({len(whitened)}) is too short to crop "
-                         f"{crop_samples} samples from each edge. Skipping edge cropping.",
-                         UserWarning)
-
     psd_array = np.array(psd)
     freqs = np.arange(len(psd)) * psd.delta_f
 
     return whitened, psd_array, freqs
 
 
-def resample_waveform(waveform, original_delta_t, target_delta_t):
+def resample_waveform(waveform, original_delta_t, target_delta_t,
+                      apply_tukey=True, tukey_alpha=0.1, tukey_side='left'):
     """
     Resample a single waveform to a different sampling rate.
 
@@ -194,6 +237,16 @@ def resample_waveform(waveform, original_delta_t, target_delta_t):
         Original time resolution in seconds
     target_delta_t : float
         Target time resolution in seconds
+    apply_tukey : bool, optional
+        Apply Tukey window before resampling to prevent edge effects (default: True)
+        The anti-aliasing filter in resampling can cause edge transients
+    tukey_alpha : float, optional
+        Tukey window alpha parameter - fraction of signal to taper (default: 0.1)
+    tukey_side : str, optional
+        Which side(s) to apply the Tukey taper (default: 'left')
+        - 'left': Only taper the beginning (preserves merger at end)
+        - 'right': Only taper the end
+        - 'both': Taper both sides
 
     Returns
     -------
@@ -210,14 +263,37 @@ def resample_waveform(waveform, original_delta_t, target_delta_t):
     >>> print(f"Original length: {len(waveform)}, Resampled length: {len(resampled)}")
     Original length: 8192, Resampled length: 4096
     """
-    # Convert to TimeSeries if needed
+    from scipy.signal.windows import tukey
+
+    # Convert to numpy array if TimeSeries
     if isinstance(waveform, TimeSeries):
-        strain = waveform
+        data = np.array(waveform)
     else:
         data = np.array(waveform)
         if data.ndim != 1:
             raise ValueError(f"Expected 1D array, got shape {data.shape}")
-        strain = TimeSeries(data, delta_t=original_delta_t)
+
+    # Apply Tukey window before resampling to prevent edge effects
+    if apply_tukey:
+        n = len(data)
+        if tukey_side == 'both':
+            window = tukey(n, alpha=tukey_alpha)
+        elif tukey_side == 'left':
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[:taper_len] = full_window[:taper_len]
+        elif tukey_side == 'right':
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[-taper_len:] = full_window[-taper_len:]
+        else:
+            raise ValueError(f"tukey_side must be 'left', 'right', or 'both', got '{tukey_side}'")
+        data = data * window
+
+    # Convert to TimeSeries
+    strain = TimeSeries(data, delta_t=original_delta_t)
 
     # Resample using PyCBC function
     resampled_strain = resample_to_delta_t(strain, target_delta_t)

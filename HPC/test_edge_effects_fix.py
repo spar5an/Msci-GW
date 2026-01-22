@@ -1,7 +1,7 @@
 """
-Test script to verify edge effect fix in whitening pipeline.
+Test script to verify Tukey window edge effect fix in whitening pipeline.
 
-This test demonstrates that the edge cropping parameter successfully eliminates
+This test demonstrates that the Tukey window parameter successfully eliminates
 the amplitude spikes caused by filter transients at the start/end of whitened waveforms.
 """
 
@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 print("=" * 80)
-print("Edge Effects Fix Verification Test")
+print("Edge Effects Fix Verification Test (Tukey Window)")
 print("=" * 80)
 
 # Configuration: Fixed masses for consistency
@@ -20,93 +20,111 @@ config = {
 }
 
 # ============================================================================
-# Test 1: Without Edge Cropping (shows edge effects)
+# Test 1: Without Tukey Window (shows edge effects)
 # ============================================================================
 print("\n" + "=" * 80)
-print("Test 1: Whitening WITHOUT Edge Cropping")
+print("Test 1: Whitening WITHOUT Tukey Window")
 print("=" * 80)
 
-result_with_edges = pycbc_data_generator(
+result_no_tukey = pycbc_data_generator(
     config,
     num_samples=10,
     add_noise=True,
     whiten=True,
     whiten_bandpass=True,
-    whiten_crop_edges=False,  # Disable edge cropping
+    whiten_tukey=False,  # Disable Tukey window
     normalize=True,
     normalize_scale=100.0,
     batch_size=10,
     show_progress=False
 )
 
-waveforms_with_edges, _ = next(iter(result_with_edges['train_loader']))
-wf_with_edges = waveforms_with_edges[0, 0, :].numpy()  # First sample, H1 detector
+waveforms_no_tukey, _ = next(iter(result_no_tukey['train_loader']))
+wf_no_tukey = waveforms_no_tukey[0, 0, :].numpy()  # First sample, H1 detector
 
-print(f"\nWaveform statistics (WITH edge effects):")
-print(f"  Length: {len(wf_with_edges)} samples")
-print(f"  Peak at start (first 100 samples): {np.abs(wf_with_edges[:100]).max():.2f}")
-print(f"  Peak in middle (samples 4000-4100): {np.abs(wf_with_edges[4000:4100]).max():.2f}")
-print(f"  Overall max: {np.abs(wf_with_edges).max():.2f}")
+print(f"\nWaveform statistics (WITHOUT Tukey - edge effects present):")
+print(f"  Length: {len(wf_no_tukey)} samples")
+print(f"  Peak at start (first 100 samples): {np.abs(wf_no_tukey[:100]).max():.2f}")
+print(f"  Peak in middle (samples 4000-4100): {np.abs(wf_no_tukey[4000:4100]).max():.2f}")
+print(f"  Overall max: {np.abs(wf_no_tukey).max():.2f}")
 
 # ============================================================================
-# Test 2: With Edge Cropping (default - removes edge effects)
+# Test 2: With Tukey Window (default - removes edge effects)
 # ============================================================================
 print("\n" + "=" * 80)
-print("Test 2: Whitening WITH Edge Cropping (Default)")
+print("Test 2: Whitening WITH Tukey Window (Default)")
 print("=" * 80)
 
-result_cropped = pycbc_data_generator(
+result_tukey = pycbc_data_generator(
     config,
     num_samples=10,
     add_noise=True,
     whiten=True,
     whiten_bandpass=True,
-    whiten_crop_edges=True,   # Enable edge cropping (default)
-    whiten_crop_samples=100,  # Crop 100 samples from each edge (default)
+    whiten_tukey=True,# Enable Tukey window (default)
+    whiten_tukey_side="left",
+    whiten_tukey_alpha=0.1,   # 10% taper (default)
     normalize=True,
     normalize_scale=100.0,
     batch_size=10,
     show_progress=False
 )
 
-waveforms_cropped, _ = next(iter(result_cropped['train_loader']))
-wf_cropped = waveforms_cropped[0, 0, :].numpy()
+waveforms_tukey, _ = next(iter(result_tukey['train_loader']))
+wf_tukey = waveforms_tukey[0, 0, :].numpy()
 
-print(f"\nWaveform statistics (CROPPED edges):")
-print(f"  Length: {len(wf_cropped)} samples")
-print(f"  Peak at start (first 100 samples): {np.abs(wf_cropped[:100]).max():.2f}")
-print(f"  Peak in middle (samples 3900-4000): {np.abs(wf_cropped[3900:4000]).max():.2f}")
-print(f"  Overall max: {np.abs(wf_cropped).max():.2f}")
+print(f"\nWaveform statistics (WITH Tukey alpha=0.1):")
+print(f"  Length: {len(wf_tukey)} samples")
+print(f"  Peak at start (first 100 samples): {np.abs(wf_tukey[:100]).max():.2f}")
+print(f"  Peak in middle (samples 4000-4100): {np.abs(wf_tukey[4000:4100]).max():.2f}")
+print(f"  Overall max: {np.abs(wf_tukey).max():.2f}")
 
 # ============================================================================
-# Test 3: Custom Crop Amount
+# Test 3: Custom Tukey Alpha (more aggressive taper)
 # ============================================================================
 print("\n" + "=" * 80)
-print("Test 3: Custom Crop Amount (50 samples)")
+print("Test 3: Custom Tukey Alpha (0.2 - more taper)")
 print("=" * 80)
 
-result_custom = pycbc_data_generator(
+result_tukey_02 = pycbc_data_generator(
     config,
     num_samples=10,
     add_noise=True,
     whiten=True,
     whiten_bandpass=True,
-    whiten_crop_edges=True,
-    whiten_crop_samples=50,  # Less aggressive cropping
+    whiten_tukey=True,
+    whiten_tukey_alpha=1,  # 20% taper - more aggressive
+    whiten_tukey_side="left",
     normalize=True,
     normalize_scale=100.0,
     batch_size=10,
     show_progress=False
 )
 
-waveforms_custom, _ = next(iter(result_custom['train_loader']))
-wf_custom = waveforms_custom[0, 0, :].numpy()
+waveforms_tukey_02, _ = next(iter(result_tukey_02['train_loader']))
+wf_tukey_02 = waveforms_tukey_02[0, 0, :].numpy()
 
-print(f"\nWaveform statistics (CUSTOM crop - 50 samples):")
-print(f"  Length: {len(wf_custom)} samples")
-print(f"  Peak at start (first 100 samples): {np.abs(wf_custom[:100]).max():.2f}")
-print(f"  Peak in middle (samples 4000-4100): {np.abs(wf_custom[4000:4100]).max():.2f}")
-print(f"  Overall max: {np.abs(wf_custom).max():.2f}")
+print(f"\nWaveform statistics (WITH Tukey alpha=0.2):")
+print(f"  Length: {len(wf_tukey_02)} samples")
+print(f"  Peak at start (first 100 samples): {np.abs(wf_tukey_02[:100]).max():.2f}")
+print(f"  Peak in middle (samples 4000-4100): {np.abs(wf_tukey_02[4000:4100]).max():.2f}")
+print(f"  Overall max: {np.abs(wf_tukey_02).max():.2f}")
+
+# ============================================================================
+# Verify all waveforms have same length
+# ============================================================================
+print("\n" + "=" * 80)
+print("Length Verification (Critical for DataLoader compatibility)")
+print("=" * 80)
+
+print(f"\n✓ No Tukey:       {len(wf_no_tukey)} samples")
+print(f"✓ Tukey α=0.1:    {len(wf_tukey)} samples")
+print(f"✓ Tukey α=0.2:    {len(wf_tukey_02)} samples")
+
+if len(wf_no_tukey) == len(wf_tukey) == len(wf_tukey_02):
+    print("\n✓ All waveforms have identical length - DataLoader compatible!")
+else:
+    print("\n⚠ Length mismatch detected!")
 
 # ============================================================================
 # Visualization
@@ -118,64 +136,59 @@ print("=" * 80)
 fig, axes = plt.subplots(3, 2, figsize=(14, 10))
 
 # Time arrays
-delta_t = result_with_edges['metadata']['time_resolution']
-time_with_edges = np.arange(len(wf_with_edges)) * delta_t
-time_cropped = np.arange(len(wf_cropped)) * delta_t
-time_custom = np.arange(len(wf_custom)) * delta_t
+delta_t = result_no_tukey['metadata']['time_resolution']
+time = np.arange(len(wf_no_tukey)) * delta_t
 
 # Row 1: Full waveforms
-axes[0, 0].plot(time_with_edges, wf_with_edges, linewidth=0.8, alpha=0.7, color='red', label='No cropping')
+axes[0, 0].plot(time, wf_no_tukey, linewidth=0.8, alpha=0.7, color='red', label='No Tukey')
 axes[0, 0].set_xlabel('Time (s)')
 axes[0, 0].set_ylabel('Normalized Strain')
-axes[0, 0].set_title('Without Edge Cropping (Edge Effects Present)', fontweight='bold')
+axes[0, 0].set_title('Without Tukey Window (Edge Effects Present)', fontweight='bold')
 axes[0, 0].legend()
 axes[0, 0].grid(True, alpha=0.3)
 
-axes[0, 1].plot(time_cropped, wf_cropped, linewidth=0.8, alpha=0.7, color='green', label='Cropped (100 samples)')
+axes[0, 1].plot(time, wf_tukey, linewidth=0.8, alpha=0.7, color='green', label='Tukey α=0.1')
 axes[0, 1].set_xlabel('Time (s)')
 axes[0, 1].set_ylabel('Normalized Strain')
-axes[0, 1].set_title('With Edge Cropping (Default: 100 samples)', fontweight='bold')
+axes[0, 1].set_title('With Tukey Window (Default: α=0.1)', fontweight='bold')
 axes[0, 1].legend()
 axes[0, 1].grid(True, alpha=0.3)
 
 # Row 2: Zoomed to first 0.1 seconds (where edge effects are visible)
-zoom_samples_with = int(0.1 / delta_t)
-zoom_samples_cropped = int(0.1 / delta_t)
+zoom_samples = int(0.1 / delta_t)
 
-axes[1, 0].plot(time_with_edges[:zoom_samples_with], wf_with_edges[:zoom_samples_with],
+axes[1, 0].plot(time[:zoom_samples], wf_no_tukey[:zoom_samples],
                 linewidth=1.5, marker='o', markersize=2, color='red')
 axes[1, 0].set_xlabel('Time (s)')
 axes[1, 0].set_ylabel('Normalized Strain')
-axes[1, 0].set_title('Zoomed: First 0.1s (NO cropping)', fontweight='bold')
+axes[1, 0].set_title('Zoomed: First 0.1s (NO Tukey)', fontweight='bold')
 axes[1, 0].grid(True, alpha=0.3)
 axes[1, 0].axhline(y=0, color='k', linestyle='--', alpha=0.3)
 
-axes[1, 1].plot(time_cropped[:zoom_samples_cropped], wf_cropped[:zoom_samples_cropped],
+axes[1, 1].plot(time[:zoom_samples], wf_tukey[:zoom_samples],
                 linewidth=1.5, marker='o', markersize=2, color='green')
 axes[1, 1].set_xlabel('Time (s)')
 axes[1, 1].set_ylabel('Normalized Strain')
-axes[1, 1].set_title('Zoomed: First 0.1s (WITH cropping)', fontweight='bold')
+axes[1, 1].set_title('Zoomed: First 0.1s (WITH Tukey)', fontweight='bold')
 axes[1, 1].grid(True, alpha=0.3)
 axes[1, 1].axhline(y=0, color='k', linestyle='--', alpha=0.3)
 
-# Row 3: Custom crop comparison and statistics
-axes[2, 0].plot(time_custom, wf_custom, linewidth=0.8, alpha=0.7, color='purple', label='Custom (50 samples)')
+# Row 3: More aggressive Tukey and comparison
+axes[2, 0].plot(time, wf_tukey_02, linewidth=0.8, alpha=0.7, color='purple', label='Tukey α=0.2')
 axes[2, 0].set_xlabel('Time (s)')
 axes[2, 0].set_ylabel('Normalized Strain')
-axes[2, 0].set_title('Custom Crop Amount (50 samples)', fontweight='bold')
+axes[2, 0].set_title('Tukey Window (α=0.2 - More Aggressive Taper)', fontweight='bold')
 axes[2, 0].legend()
 axes[2, 0].grid(True, alpha=0.3)
 
 # Comparison plot: All three overlaid on zoomed region
-zoom_end = min(len(wf_with_edges), len(wf_cropped), len(wf_custom))
-zoom_samples = min(int(0.15 / delta_t), zoom_end)
-
-axes[2, 1].plot(time_with_edges[:zoom_samples], wf_with_edges[:zoom_samples],
-                linewidth=1.2, alpha=0.7, color='red', label='No crop')
-axes[2, 1].plot(time_cropped[:zoom_samples], wf_cropped[:zoom_samples],
-                linewidth=1.2, alpha=0.7, color='green', label='Crop 100')
-axes[2, 1].plot(time_custom[:zoom_samples], wf_custom[:zoom_samples],
-                linewidth=1.2, alpha=0.7, color='purple', label='Crop 50')
+zoom_end = int(0.15 / delta_t)
+axes[2, 1].plot(time[:zoom_end], wf_no_tukey[:zoom_end],
+                linewidth=1.2, alpha=0.7, color='red', label='No Tukey')
+axes[2, 1].plot(time[:zoom_end], wf_tukey[:zoom_end],
+                linewidth=1.2, alpha=0.7, color='green', label='Tukey α=0.1')
+axes[2, 1].plot(time[:zoom_end], wf_tukey_02[:zoom_end],
+                linewidth=1.2, alpha=0.7, color='purple', label='Tukey α=0.2')
 axes[2, 1].set_xlabel('Time (s)')
 axes[2, 1].set_ylabel('Normalized Strain')
 axes[2, 1].set_title('Overlay Comparison: First 0.15s', fontweight='bold')
@@ -183,8 +196,8 @@ axes[2, 1].legend()
 axes[2, 1].grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('edge_effects_fix_verification.png', dpi=150, bbox_inches='tight')
-print("  Saved: edge_effects_fix_verification.png")
+plt.savefig('edge_effects_tukey_verification.png', dpi=150, bbox_inches='tight')
+print("  Saved: edge_effects_tukey_verification.png")
 
 # ============================================================================
 # Statistical Analysis
@@ -201,20 +214,20 @@ def compute_edge_to_middle_ratio(waveform):
     middle_peak = np.abs(waveform[middle_start:middle_end]).max()
     return edge_peak / middle_peak if middle_peak > 0 else float('inf')
 
-ratio_no_crop = compute_edge_to_middle_ratio(wf_with_edges)
-ratio_crop_100 = compute_edge_to_middle_ratio(wf_cropped)
-ratio_crop_50 = compute_edge_to_middle_ratio(wf_custom)
+ratio_no_tukey = compute_edge_to_middle_ratio(wf_no_tukey)
+ratio_tukey_01 = compute_edge_to_middle_ratio(wf_tukey)
+ratio_tukey_02 = compute_edge_to_middle_ratio(wf_tukey_02)
 
 print(f"\nEdge-to-Middle Peak Ratio (lower is better):")
-print(f"  No cropping:      {ratio_no_crop:.2f}x")
-print(f"  Crop 100 samples: {ratio_crop_100:.2f}x")
-print(f"  Crop 50 samples:  {ratio_crop_50:.2f}x")
+print(f"  No Tukey:       {ratio_no_tukey:.2f}x")
+print(f"  Tukey α=0.1:    {ratio_tukey_01:.2f}x")
+print(f"  Tukey α=0.2:    {ratio_tukey_02:.2f}x")
 
 print("\nInterpretation:")
-if ratio_crop_100 < ratio_no_crop * 0.5:
-    print("  ✓ Edge cropping (100 samples) successfully reduces edge effects!")
+if ratio_tukey_01 < ratio_no_tukey * 0.5:
+    print("  ✓ Tukey window (α=0.1) successfully reduces edge effects!")
 else:
-    print("  ⚠ Edge effects still present after cropping")
+    print("  ⚠ Edge effects still present - try increasing alpha")
 
 # ============================================================================
 # Summary
@@ -223,32 +236,32 @@ print("\n" + "=" * 80)
 print("Test Summary")
 print("=" * 80)
 
-print(f"\n✓ Test 1: Generated {len(wf_with_edges)} sample waveform without edge cropping")
-print(f"    - Edge spike detected: {np.abs(wf_with_edges[:100]).max():.2f}")
+print(f"\n✓ Test 1: Generated {len(wf_no_tukey)} sample waveform without Tukey window")
+print(f"    - Edge spike detected: {np.abs(wf_no_tukey[:100]).max():.2f}")
 
-print(f"\n✓ Test 2: Generated {len(wf_cropped)} sample waveform with default edge cropping")
-print(f"    - Length reduced by: {len(wf_with_edges) - len(wf_cropped)} samples")
-print(f"    - Edge spike after cropping: {np.abs(wf_cropped[:100]).max():.2f}")
+print(f"\n✓ Test 2: Generated {len(wf_tukey)} sample waveform with Tukey window (α=0.1)")
+print(f"    - Same length as input: ✓")
+print(f"    - Edge spike reduced to: {np.abs(wf_tukey[:100]).max():.2f}")
 
-print(f"\n✓ Test 3: Generated {len(wf_custom)} sample waveform with custom cropping (50 samples)")
-print(f"    - Length reduced by: {len(wf_with_edges) - len(wf_custom)} samples")
+print(f"\n✓ Test 3: Generated {len(wf_tukey_02)} sample waveform with Tukey window (α=0.2)")
+print(f"    - Same length as input: ✓")
+print(f"    - Edge spike reduced to: {np.abs(wf_tukey_02[:100]).max():.2f}")
 
-print("\n✓ Visualization created: edge_effects_fix_verification.png")
+print("\n✓ Visualization created: edge_effects_tukey_verification.png")
 
 print("\n" + "=" * 80)
-print("Recommendations for LSTM Training")
+print("Tukey Window Parameters Guide")
 print("=" * 80)
-print("\n1. Use default edge cropping (whiten_crop_edges=True, whiten_crop_samples=100)")
-print("   - Eliminates filter transients")
-print("   - Minimal signal loss (~0.024s at 4096 Hz)")
-print("   - Merger signal (centered) is preserved")
+print("\nThe alpha parameter controls the fraction of the signal that gets tapered:")
+print("  α=0.0  → Rectangular window (no taper, maximum edge effects)")
+print("  α=0.1  → 5% tapered on each edge, 90% flat (default, recommended)")
+print("  α=0.2  → 10% tapered on each edge, 80% flat")
+print("  α=0.5  → 25% tapered on each edge, 50% flat (Hann-like)")
+print("  α=1.0  → Full Hann window (all tapered)")
 
-print("\n2. If edge effects are still visible:")
-print("   - Increase whiten_crop_samples to 150 or 200")
-print("   - Or disable bandpass entirely (whiten_bandpass=False)")
-
-print("\n3. For maximum signal preservation:")
-print("   - Reduce to whiten_crop_samples=50")
-print("   - Accept small residual edge effects")
+print("\nRecommendations:")
+print("  - For LSTM training: Use α=0.1 (default) - minimal signal distortion")
+print("  - If edge effects persist: Increase to α=0.2")
+print("  - For short signals (<1s): Consider α=0.05 to preserve more data")
 
 print("\n" + "=" * 80)

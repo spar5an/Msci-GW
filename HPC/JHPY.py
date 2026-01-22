@@ -20,12 +20,300 @@ from pycbc.detector import Detector
 from pycbc.psd import aLIGOZeroDetHighPower
 from pycbc.noise import noise_from_psd
 from pycbc.types import TimeSeries
+from pycbc.types import TimeSeries, FrequencySeries
+from pycbc.psd import welch, interpolate
+from pycbc.filter import highpass_fir, lowpass_fir, resample_to_delta_t
 from torch.utils.data import Subset
 import warnings
 
 
 
 ################### Miscellaneous functions ###################
+def normalize_waveform(waveform, scale_factor=1e21):
+    """
+    Normalize a single waveform by multiplying by a fixed scale factor.
+
+    This scales very small gravitational wave strain values (typically ~10^-21)
+    to order 1-10 range for easier processing and visualization.
+
+    Parameters
+    ----------
+    waveform : np.ndarray or TimeSeries
+        Single waveform to normalize (1D array)
+    scale_factor : float, optional
+        Fixed scaling factor to multiply the waveform by.
+        Default: 1e21 (appropriate for typical GW strains of ~1e-21)
+
+    Returns
+    -------
+    normalized : np.ndarray
+        Scaled waveform as numpy array
+
+    Examples
+    --------
+    >>> waveform = np.random.randn(1000) * 1e-21  # Typical GW strain
+    >>> normalized = normalize_waveform(waveform)  # Scale by 1e21
+    >>> print(f"Typical amplitude: {normalized.std():.1f}")
+    Typical amplitude: 1.0
+    """
+    # Convert to numpy array if needed
+    if isinstance(waveform, TimeSeries):
+        data = np.array(waveform)
+    else:
+        data = np.array(waveform)
+
+    # Validate input
+    if data.ndim != 1:
+        raise ValueError(f"Expected 1D array, got shape {data.shape}")
+
+    # Apply fixed scaling
+    normalized = data * scale_factor
+
+    return normalized
+
+
+def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
+                    apply_tukey=True, tukey_alpha=0.1, tukey_side='left'):
+    """
+    Whiten a single waveform using PSD-based whitening.
+
+    Follows the PyCBC GW150914 tutorial approach:
+    https://pycbc.org/pycbc/latest/html/gw150914.html
+
+    The whitening process:
+    1. Optionally apply Tukey window to prevent edge effects
+    2. Compute PSD using Welch's method
+    3. Interpolate PSD to smooth frequency grid
+    4. Divide frequency-domain data by sqrt(PSD)
+    5. Convert back to time domain
+    6. Optionally apply bandpass filter (35-300 Hz)
+
+    Parameters
+    ----------
+    waveform : np.ndarray or TimeSeries
+        Single waveform to whiten (1D array)
+    delta_t : float, optional
+        Time resolution in seconds (default: 1/4096)
+    f_lower : float, optional
+        Lower frequency cutoff in Hz (default: 20.0)
+    apply_bandpass : bool, optional
+        Apply bandpass filter 35-300 Hz (default: True)
+    apply_tukey : bool, optional
+        Apply Tukey window before whitening to prevent edge effects (default: True)
+        Smoothly tapers signal edges to zero, eliminating filter ringing
+    tukey_alpha : float, optional
+        Tukey window alpha parameter - fraction of signal to taper (default: 0.1)
+        0.1 means 5% tapered on each edge, 90% flat in middle
+    tukey_side : str, optional
+        Which side(s) to apply the Tukey taper (default: 'left')
+        - 'left': Only taper the beginning (preserves merger at end)
+        - 'right': Only taper the end
+        - 'both': Taper both sides (standard Tukey window)
+
+    Returns
+    -------
+    whitened : np.ndarray
+        Whitened waveform as numpy array (same length as input)
+    psd : np.ndarray
+        Power spectral density used for whitening
+    freqs : np.ndarray
+        Frequency array for PSD
+
+    Notes
+    -----
+    Edge effects (amplitude spikes at start/end) are caused by FIR filter
+    transients from the bandpass filter. The Tukey window prevents these by
+    smoothly tapering the signal edges to zero before processing, eliminating
+    the discontinuities that cause filter ringing.
+
+    For GW signals where the merger is at the end of the waveform, use
+    tukey_side='left' to only taper the beginning and preserve the merger.
+
+    The output length always matches the input length.
+
+    Examples
+    --------
+    >>> waveform = np.random.randn(8192)
+    >>> whitened, psd, freqs = whiten_waveform(waveform, delta_t=1/4096)
+    >>> print(f"Input: {waveform.shape}, Output: {whitened.shape}")
+    Input: (8192,), Output: (8192,)
+
+    >>> # Taper only the beginning (preserve merger at end)
+    >>> whitened, psd, freqs = whiten_waveform(waveform, tukey_side='left')
+
+    >>> # Disable Tukey window (will have edge effects)
+    >>> whitened, psd, freqs = whiten_waveform(waveform, apply_tukey=False)
+    """
+    from scipy.signal.windows import tukey
+    # Convert to numpy array if TimeSeries
+    if isinstance(waveform, TimeSeries):
+        data = np.array(waveform)
+    else:
+        data = np.array(waveform)
+        if data.ndim != 1:
+            raise ValueError(f"Expected 1D array, got shape {data.shape}")
+
+    # Convert to TimeSeries
+    strain = TimeSeries(data, delta_t=delta_t)
+
+    # Compute PSD using Welch method (PyCBC tutorial approach)
+    # Adjust segment length for short signals - need at least 2 segments
+    n_samples = len(strain)
+    if n_samples >= 4096:
+        # Default: use 4096 sample segments
+        seg_len = 4096
+        seg_stride = 2048
+    elif n_samples >= 1024:
+        # Short signals: use smaller segments (1/4 of signal length)
+        seg_len = max(256, n_samples // 4)
+        seg_stride = seg_len // 2
+    else:
+        # Very short signals: use minimal segments
+        seg_len = max(64, n_samples // 4)
+        seg_stride = seg_len // 2
+
+    psd_welch = welch(strain, seg_len=seg_len, seg_stride=seg_stride)
+
+    # Interpolate to smooth frequency grid
+    psd = interpolate(psd_welch, 1.0 / strain.duration)
+
+    # Convert strain to frequency domain
+    freq_series = strain.to_frequencyseries()
+
+    # Resize PSD to match frequency series length
+    psd.resize(len(freq_series))
+
+    # Add small epsilon to PSD to avoid division by zero
+    # This handles cases where PSD might be zero or very small
+    psd_safe = psd.copy()
+    psd_array = np.array(psd_safe)
+    epsilon = 1e-40  # Very small value to prevent division by zero
+    psd_array[psd_array <= 0] = epsilon
+    psd_safe = FrequencySeries(psd_array, delta_f=psd.delta_f, epoch=psd.epoch)
+
+    # Whiten: divide by sqrt(PSD) in frequency domain
+    white_strain = (freq_series / (psd_safe ** 0.5)).to_timeseries()
+
+    # Apply Tukey window BEFORE bandpass filtering to prevent edge effects
+    # The window tapers the whitened signal to zero at edges, preventing
+    # the FIR filter from ringing at discontinuities
+    if apply_tukey and apply_bandpass:
+        n = len(white_strain)
+        if tukey_side == 'both':
+            # Standard symmetric Tukey window
+            window = tukey(n, alpha=tukey_alpha)
+        elif tukey_side == 'left':
+            # Only taper the beginning - create half Tukey window
+            # Use a full Tukey window but only take the left taper + flat portion
+            full_window = tukey(n, alpha=tukey_alpha * 2)  # Double alpha since we only use half
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[:taper_len] = full_window[:taper_len]
+        elif tukey_side == 'right':
+            # Only taper the end - create half Tukey window
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[-taper_len:] = full_window[-taper_len:]
+        else:
+            raise ValueError(f"tukey_side must be 'left', 'right', or 'both', got '{tukey_side}'")
+
+        white_strain = TimeSeries(np.array(white_strain) * window, delta_t=delta_t)
+
+    # Apply optional bandpass filtering
+    if apply_bandpass:
+        white_strain = highpass_fir(white_strain, 35, 8)
+        white_strain = lowpass_fir(white_strain, 300, 8)
+
+    # Prepare outputs
+    whitened = np.array(white_strain)
+    psd_array = np.array(psd)
+    freqs = np.arange(len(psd)) * psd.delta_f
+
+    return whitened, psd_array, freqs
+
+
+def resample_waveform(waveform, original_delta_t, target_delta_t,
+                      apply_tukey=True, tukey_alpha=0.1, tukey_side='left'):
+    """
+    Resample a single waveform to a different sampling rate.
+
+    Uses PyCBC's resample_to_delta_t function which applies proper
+    anti-aliasing filtering.
+
+    Parameters
+    ----------
+    waveform : np.ndarray or TimeSeries
+        Single waveform to resample (1D array)
+    original_delta_t : float
+        Original time resolution in seconds
+    target_delta_t : float
+        Target time resolution in seconds
+    apply_tukey : bool, optional
+        Apply Tukey window before resampling to prevent edge effects (default: True)
+        The anti-aliasing filter in resampling can cause edge transients
+    tukey_alpha : float, optional
+        Tukey window alpha parameter - fraction of signal to taper (default: 0.1)
+    tukey_side : str, optional
+        Which side(s) to apply the Tukey taper (default: 'left')
+        - 'left': Only taper the beginning (preserves merger at end)
+        - 'right': Only taper the end
+        - 'both': Taper both sides
+
+    Returns
+    -------
+    resampled : np.ndarray
+        Resampled waveform as numpy array
+
+    Examples
+    --------
+    >>> waveform = np.random.randn(8192)
+    >>> # Downsample from 4096 Hz to 2048 Hz
+    >>> resampled = resample_waveform(waveform,
+    ...                               original_delta_t=1/4096,
+    ...                               target_delta_t=1/2048)
+    >>> print(f"Original length: {len(waveform)}, Resampled length: {len(resampled)}")
+    Original length: 8192, Resampled length: 4096
+    """
+    from scipy.signal.windows import tukey
+
+    # Convert to numpy array if TimeSeries
+    if isinstance(waveform, TimeSeries):
+        data = np.array(waveform)
+    else:
+        data = np.array(waveform)
+        if data.ndim != 1:
+            raise ValueError(f"Expected 1D array, got shape {data.shape}")
+
+    # Apply Tukey window before resampling to prevent edge effects
+    if apply_tukey:
+        n = len(data)
+        if tukey_side == 'both':
+            window = tukey(n, alpha=tukey_alpha)
+        elif tukey_side == 'left':
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[:taper_len] = full_window[:taper_len]
+        elif tukey_side == 'right':
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            window[-taper_len:] = full_window[-taper_len:]
+        else:
+            raise ValueError(f"tukey_side must be 'left', 'right', or 'both', got '{tukey_side}'")
+        data = data * window
+
+    # Convert to TimeSeries
+    strain = TimeSeries(data, delta_t=original_delta_t)
+
+    # Resample using PyCBC function
+    resampled_strain = resample_to_delta_t(strain, target_delta_t)
+
+    # Convert to numpy array
+    resampled = np.array(resampled_strain)
+
+    return resampled
 
 def simulate_sine_wave(frequency, num_points=1000, noise_std=0.1, amplitude=1.0, phase=0):
     """
@@ -134,8 +422,18 @@ def _generate_parameter_sets(config: Dict[str, Callable], num_samples: int) -> L
 
 def _generate_single_waveform(params: Dict, time_resolution: float, approximant: str,
                               f_lower: float, detectors: List[str], target_length: int,
-                              add_noise: bool = True) -> Dict:
-    """Worker function to generate a single waveform and project to detectors at fixed length."""
+                              add_noise: bool = True,
+                              whiten: bool = False,
+                              whiten_bandpass: bool = True,
+                              whiten_tukey: bool = True,
+                              whiten_tukey_alpha: float = 0.1,
+                              whiten_tukey_side: str = 'left',
+                              normalize: bool = False,
+                              normalize_scale: float = 100.0) -> Dict:
+    """Worker function to generate a single waveform and project to detectors at fixed length.
+
+    Optionally applies whitening and normalization in parallel for better performance.
+    """
     try:
         hp, hc = get_td_waveform(
             approximant=approximant,
@@ -201,17 +499,42 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
 
                 # Inject noise into signal (both guaranteed to be target_length)
                 detector_signals[det_name] = signal.inject(noise)
+                
+                # Apply whitening and normalization (in parallel with waveform generation)
+        if whiten or normalize:
+
+            for det_name in detectors:
+                waveform = np.array(detector_signals[det_name])
+
+                # Step 1: Whiten (if enabled)
+                if whiten:
+                    whitened, _, _ = whiten_waveform(
+                        waveform,
+                        delta_t=time_resolution,
+                        f_lower=f_lower,
+                        apply_bandpass=whiten_bandpass,
+                        apply_tukey=whiten_tukey,
+                        tukey_alpha=whiten_tukey_alpha,
+                        tukey_side=whiten_tukey_side
+                    )
+                    waveform = whitened
+
+                # Step 2: Normalize (if enabled)
+                if normalize:
+                    waveform = normalize_waveform(waveform, scale_factor=normalize_scale)
+
+                detector_signals[det_name] = waveform
 
 
-        
+
         result = {
             'success': True,
             'detectors': detector_signals,
             'params': params
         }
-        
+
         return result
-        
+
     except Exception as e:
         return {'success': False, 'error': str(e), 'params': params}
 
@@ -224,15 +547,32 @@ def _generate_waveforms_parallel(param_dicts: List[Dict],
                                 show_progress: bool,
                                 detectors: List[str],
                                 target_length: int,
-                                add_noise: bool) -> List[Dict]:
-    """Generate waveforms in parallel using multiprocessing."""
+                                add_noise: bool,
+                                whiten: bool = False,
+                                whiten_bandpass: bool = True,
+                                whiten_tukey: bool = True,
+                                whiten_tukey_alpha: float = 0.1,
+                                whiten_tukey_side: str = 'left',
+                                normalize: bool = False,
+                                normalize_scale: float = 100.0) -> List[Dict]:
+    """Generate waveforms in parallel using multiprocessing.
+
+    Whitening and normalization are applied in parallel for better performance.
+    """
     worker_func = partial(_generate_single_waveform,
                           time_resolution=time_resolution,
                           approximant=approximant,
                           f_lower=f_lower,
                           detectors=detectors,
                           target_length=target_length,
-                          add_noise=add_noise)
+                          add_noise=add_noise,
+                          whiten=whiten,
+                          whiten_bandpass=whiten_bandpass,
+                          whiten_tukey=whiten_tukey,
+                          whiten_tukey_alpha=whiten_tukey_alpha,
+                          whiten_tukey_side=whiten_tukey_side,
+                          normalize=normalize,
+                          normalize_scale=normalize_scale)
     
     with Pool(processes=num_workers) as pool:
         if show_progress:
@@ -263,8 +603,9 @@ def pycbc_data_generator(config: Dict[str, Callable],
                         add_noise: bool = True,
                         whiten: bool = False,
                         whiten_bandpass: bool = True,
-                        whiten_crop_edges: bool = False,
-                        whiten_crop_samples: int = 100,
+                        whiten_tukey: bool = True,
+                        whiten_tukey_alpha: float = 0.1,
+                        whiten_tukey_side: str = 'left',
                         normalize: bool = False,
                         normalize_scale: float = 100.0,
                         resample_rate: float = None) -> Dict:
@@ -319,13 +660,17 @@ def pycbc_data_generator(config: Dict[str, Callable],
     whiten_bandpass : bool
         Apply 35-300 Hz bandpass filter after whitening. Default: True
         Only used if whiten=True
-    whiten_crop_edges : bool
-        Remove edge samples to eliminate filter transients. Default: True
-        Only used if whiten=True and whiten_bandpass=True
-    whiten_crop_samples : int
-        Number of samples to crop from each edge. Default: 100
-        At 4096 Hz, 100 samples = ~0.024 seconds
-        Only used if whiten_crop_edges=True
+    whiten_tukey : bool
+        Apply Tukey window before whitening to prevent edge effects. Default: True
+        Smoothly tapers signal edges to zero, eliminating filter ringing
+    whiten_tukey_alpha : float
+        Tukey window alpha parameter - fraction of signal to taper. Default: 0.1
+        0.1 means 5% tapered on each edge, 90% flat in middle
+    whiten_tukey_side : str
+        Which side(s) to apply the Tukey taper. Default: 'left'
+        - 'left': Only taper the beginning (preserves merger at end)
+        - 'right': Only taper the end
+        - 'both': Taper both sides (standard Tukey window)
     normalize : bool
         Apply fixed-scale normalization to signals. Default: False
     normalize_scale : float
@@ -411,8 +756,12 @@ def pycbc_data_generator(config: Dict[str, Callable],
             print(f"\nChunk {chunk_idx + 1}/{num_chunks} ({len(chunk_params)} waveforms)...")
 
         # Generate waveforms with detector projection at fixed length
+        # Whitening and normalization are applied in parallel for better performance
         chunk_results = _generate_waveforms_parallel(
-            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise
+            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise,
+            whiten=whiten, whiten_bandpass=whiten_bandpass, whiten_tukey=whiten_tukey,
+            whiten_tukey_alpha=whiten_tukey_alpha, whiten_tukey_side=whiten_tukey_side,
+            normalize=normalize, normalize_scale=normalize_scale
         )
         
         # Single pass: separate and accumulate
@@ -445,17 +794,17 @@ def pycbc_data_generator(config: Dict[str, Callable],
     print(f"  All signals fixed to: {target_length} samples ({signal_length}s)")
 
     # Compute final length accounting for resampling
-    target_length_samples = target_length
+    final_length = target_length
     if resample_rate is not None:
         original_rate = 1.0 / time_resolution
         target_delta_t = 1.0 / resample_rate
         original_length_seconds = target_length * time_resolution
-        target_length_samples = int(original_length_seconds / target_delta_t)
+        final_length = int(original_length_seconds / target_delta_t)
         print(f"  Resampling enabled: {original_rate}Hz → {resample_rate}Hz")
-        print(f"  Final length: {target_length_samples} samples")
+        print(f"  Final length: {final_length} samples")
 
-    # Pre-allocate arrays (all signals are already at target_length)
-    signal_array = np.empty((num_success, num_detectors, target_length_samples), dtype=np.float32)
+    # Pre-allocate arrays at ORIGINAL size for extraction
+    signal_array = np.empty((num_success, num_detectors, target_length), dtype=np.float32)
     param_array = np.empty((num_success, num_params), dtype=np.float32)
 
     print(f"  Extracting signals and parameters...")
@@ -471,52 +820,32 @@ def pycbc_data_generator(config: Dict[str, Callable],
             # TimeSeries objects support array protocol, direct assignment is efficient
             signal_array[i, k, :] = waveform_data['detectors'][det_name]
 
-    # Apply preprocessing pipeline if requested
-    if whiten or normalize or resample_rate:
-        from data_generator import whiten_waveform, normalize_waveform, resample_waveform
+    # Whitening and normalization are now done in parallel during generation
+    # Only resampling needs to be done here (if requested)
+    if resample_rate:
+        from data_generator import resample_waveform
 
-        print(f"  Applying preprocessing pipeline...")
-        if whiten:
-            crop_info = f", crop_edges={whiten_crop_edges}" if whiten_bandpass else ""
-            if whiten_bandpass and whiten_crop_edges:
-                crop_info += f" ({whiten_crop_samples} samples)"
-            print(f"    - Whitening (f_lower={f_lower}Hz, bandpass={whiten_bandpass}{crop_info})")
-        if normalize:
-            print(f"    - Normalizing (scale={normalize_scale})")
-        if resample_rate:
-            print(f"    - Resampling to {resample_rate}Hz")
+        print(f"  Applying resampling: {1.0/time_resolution:.0f}Hz → {resample_rate}Hz...")
 
-        # Process each sample and detector
-        for i in range(signal_array.shape[0]):
-            for j in range(signal_array.shape[1]):
+        # Create new array at final size
+        signal_array_resampled = np.empty((num_success, num_detectors, final_length), dtype=np.float32)
+
+        # Resample each waveform
+        for i in range(num_success):
+            for j in range(num_detectors):
                 waveform = signal_array[i, j, :]
+                target_delta_t = 1.0 / resample_rate
+                resampled = resample_waveform(
+                    waveform,
+                    original_delta_t=time_resolution,
+                    target_delta_t=target_delta_t,
+                    apply_tukey=whiten_tukey,
+                    tukey_alpha=whiten_tukey_alpha,
+                    tukey_side=whiten_tukey_side
+                )
+                signal_array_resampled[i, j, :] = resampled
 
-                # Step 1: Whiten (if enabled)
-                if whiten:
-                    whitened, _, _ = whiten_waveform(
-                        waveform,
-                        delta_t=time_resolution,
-                        f_lower=f_lower,
-                        apply_bandpass=whiten_bandpass,
-                        crop_edges=whiten_crop_edges,
-                        crop_samples=whiten_crop_samples
-                    )
-                    waveform = whitened
-
-                # Step 2: Normalize (if enabled)
-                if normalize:
-                    waveform = normalize_waveform(waveform, scale_factor=normalize_scale)
-
-                # Step 3: Resample (if enabled)
-                if resample_rate:
-                    target_delta_t = 1.0 / resample_rate
-                    waveform = resample_waveform(
-                        waveform,
-                        original_delta_t=time_resolution,
-                        target_delta_t=target_delta_t
-                    )
-
-                signal_array[i, j, :] = waveform
+        signal_array = signal_array_resampled
 
     print(f"  Converting to PyTorch tensors...")
 
@@ -578,7 +907,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
                 'resampled': resample_rate is not None,
                 'original_rate': 1.0 / time_resolution if resample_rate else None,
                 'resample_rate': resample_rate,
-                'final_length_samples': target_length_samples,
+                'final_length_samples': final_length,
             }
         }
     }
@@ -855,6 +1184,174 @@ def resample_dataloaders(result: Dict,
         'test_loader': test_loader,
         'metadata': new_metadata
     }
+
+
+def truncate_dataloaders(result: Dict,
+                         target_length: int = None,
+                         target_duration: float = None,
+                         keep_end: bool = True,
+                         batch_size: int = None,
+                         preserve_splits: bool = True) -> Dict:
+    """
+    Truncate all waveforms in a DataLoader result to a specified length.
+
+    This function extracts waveforms from existing DataLoaders, cuts them
+    to the specified length, and repackages them into new DataLoaders.
+    Useful for keeping only the merger portion of signals or standardizing
+    signal lengths.
+
+    Parameters
+    ----------
+    result : dict
+        Result dictionary from pycbc_data_generator() or load_dataloaders()
+        Must contain 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    target_length : int, optional
+        Target length in samples. Either this or target_duration must be specified.
+    target_duration : float, optional
+        Target duration in seconds. Will be converted to samples using metadata.
+        Either this or target_length must be specified.
+    keep_end : bool
+        If True (default), keeps the END of the signal (where merger is).
+        If False, keeps the START of the signal.
+    batch_size : int, optional
+        Batch size for new DataLoaders. If None, uses original batch_size.
+    preserve_splits : bool
+        If True, maintains original train/val/test splits. Default: True
+
+    Returns
+    -------
+    dict
+        New DataLoader result with truncated data, same structure as input
+
+    Examples
+    --------
+    >>> # Generate 2-second signals
+    >>> result = pycbc_data_generator(config, num_samples=1000, signal_length=2.0)
+    >>> # Keep only last 1 second (merger)
+    >>> result_1s = truncate_dataloaders(result, target_duration=1.0, keep_end=True)
+    >>> # Or specify in samples
+    >>> result_512 = truncate_dataloaders(result, target_length=512, keep_end=True)
+    """
+    # Extract metadata
+    metadata = result['metadata'].copy()
+    delta_t = metadata['time_resolution']
+    sample_rate = 1.0 / delta_t
+
+    # Determine target length
+    if target_length is None and target_duration is None:
+        raise ValueError("Must specify either target_length or target_duration")
+    if target_length is not None and target_duration is not None:
+        raise ValueError("Specify only one of target_length or target_duration")
+
+    if target_duration is not None:
+        target_length = int(target_duration * sample_rate)
+
+    # Extract indices from Subsets
+    train_dataset = result['train_loader'].dataset
+    val_dataset = result['val_loader'].dataset
+    test_dataset = result['test_loader'].dataset
+
+    # Get base dataset (unwrap from Subset)
+    base_dataset = train_dataset.dataset
+    X_full = base_dataset.tensors[0]  # (N, num_detectors, time_length)
+    y_full = base_dataset.tensors[1]  # (N, num_params)
+
+    # Get split indices
+    train_indices = train_dataset.indices
+    val_indices = val_dataset.indices
+    test_indices = test_dataset.indices
+
+    # Get dimensions
+    num_samples = X_full.shape[0]
+    num_detectors = X_full.shape[1]
+    original_length = X_full.shape[2]
+
+    if target_length > original_length:
+        raise ValueError(f"target_length ({target_length}) cannot be greater than "
+                        f"original length ({original_length})")
+
+    original_duration = original_length * delta_t
+    new_duration = target_length * delta_t
+
+    print(f"Truncating DataLoaders...")
+    print(f"  Original: {original_length} samples ({original_duration:.3f}s)")
+    print(f"  Target: {target_length} samples ({new_duration:.3f}s)")
+    print(f"  Keeping: {'END' if keep_end else 'START'} of signal")
+
+    # Truncate waveforms
+    if keep_end:
+        # Keep the end (where merger is)
+        X_truncated = X_full[:, :, -target_length:]
+    else:
+        # Keep the start
+        X_truncated = X_full[:, :, :target_length]
+
+    # Make a contiguous copy
+    X_truncated = X_truncated.clone()
+
+    print(f"  Processing {num_samples} waveforms... done!")
+
+    # Create new dataset
+    new_dataset = TensorDataset(X_truncated, y_full)
+
+    # Create subsets with preserved indices
+    if preserve_splits:
+        train_data = Subset(new_dataset, train_indices)
+        val_data = Subset(new_dataset, val_indices)
+        test_data = Subset(new_dataset, test_indices)
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+    else:
+        # Re-split with same proportions
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+        train_data, val_data, test_data = random_split(
+            new_dataset, [train_size, val_size, test_size]
+        )
+
+    # Determine batch size
+    if batch_size is None:
+        batch_size = metadata.get('batch_size', 256)
+
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+
+    # Update metadata
+    new_metadata = metadata.copy()
+    new_metadata['waveform_shape'] = (num_detectors, target_length)
+    new_metadata['target_length'] = target_length
+    new_metadata['signal_length'] = new_duration
+    new_metadata['batch_size'] = batch_size
+    new_metadata['train_size'] = train_size
+    new_metadata['val_size'] = val_size
+    new_metadata['test_size'] = test_size
+
+    # Update preprocessing info
+    if 'preprocessing' not in new_metadata:
+        new_metadata['preprocessing'] = {}
+
+    new_metadata['preprocessing'] = new_metadata['preprocessing'].copy()
+    new_metadata['preprocessing']['truncated'] = True
+    new_metadata['preprocessing']['original_length'] = original_length
+    new_metadata['preprocessing']['truncated_length'] = target_length
+    new_metadata['preprocessing']['keep_end'] = keep_end
+
+    print(f"\nNew DataLoaders created:")
+    print(f"  Waveform shape: {new_metadata['waveform_shape']}")
+    print(f"  Duration: {new_duration:.3f}s")
+    print(f"  Batch size: {batch_size}")
+
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': new_metadata
+    }
+
 
 ################### Neural Network Layers ###################
 
