@@ -1,3 +1,6 @@
 __pycache__/
 CLAUDE.md
 /.claude
+/HPCOutputLogs
+/eHPCOutputLogs
+/waveform_cache
