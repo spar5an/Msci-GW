@@ -422,18 +422,8 @@ def _generate_parameter_sets(config: Dict[str, Callable], num_samples: int) -> L
 
 def _generate_single_waveform(params: Dict, time_resolution: float, approximant: str,
                               f_lower: float, detectors: List[str], target_length: int,
-                              add_noise: bool = True,
-                              whiten: bool = False,
-                              whiten_bandpass: bool = True,
-                              whiten_tukey: bool = True,
-                              whiten_tukey_alpha: float = 0.1,
-                              whiten_tukey_side: str = 'left',
-                              normalize: bool = False,
-                              normalize_scale: float = 100.0) -> Dict:
-    """Worker function to generate a single waveform and project to detectors at fixed length.
-
-    Optionally applies whitening and normalization in parallel for better performance.
-    """
+                              add_noise: bool = True) -> Dict:
+    """Worker function to generate a single waveform and project to detectors at fixed length."""
     try:
         hp, hc = get_td_waveform(
             approximant=approximant,
@@ -499,33 +489,6 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
 
                 # Inject noise into signal (both guaranteed to be target_length)
                 detector_signals[det_name] = signal.inject(noise)
-                
-                # Apply whitening and normalization (in parallel with waveform generation)
-        if whiten or normalize:
-
-            for det_name in detectors:
-                waveform = np.array(detector_signals[det_name])
-
-                # Step 1: Whiten (if enabled)
-                if whiten:
-                    whitened, _, _ = whiten_waveform(
-                        waveform,
-                        delta_t=time_resolution,
-                        f_lower=f_lower,
-                        apply_bandpass=whiten_bandpass,
-                        apply_tukey=whiten_tukey,
-                        tukey_alpha=whiten_tukey_alpha,
-                        tukey_side=whiten_tukey_side
-                    )
-                    waveform = whitened
-
-                # Step 2: Normalize (if enabled)
-                if normalize:
-                    waveform = normalize_waveform(waveform, scale_factor=normalize_scale)
-
-                detector_signals[det_name] = waveform
-
-
 
         result = {
             'success': True,
@@ -547,32 +510,15 @@ def _generate_waveforms_parallel(param_dicts: List[Dict],
                                 show_progress: bool,
                                 detectors: List[str],
                                 target_length: int,
-                                add_noise: bool,
-                                whiten: bool = False,
-                                whiten_bandpass: bool = True,
-                                whiten_tukey: bool = True,
-                                whiten_tukey_alpha: float = 0.1,
-                                whiten_tukey_side: str = 'left',
-                                normalize: bool = False,
-                                normalize_scale: float = 100.0) -> List[Dict]:
-    """Generate waveforms in parallel using multiprocessing.
-
-    Whitening and normalization are applied in parallel for better performance.
-    """
+                                add_noise: bool) -> List[Dict]:
+    """Generate waveforms in parallel using multiprocessing."""
     worker_func = partial(_generate_single_waveform,
                           time_resolution=time_resolution,
                           approximant=approximant,
                           f_lower=f_lower,
                           detectors=detectors,
                           target_length=target_length,
-                          add_noise=add_noise,
-                          whiten=whiten,
-                          whiten_bandpass=whiten_bandpass,
-                          whiten_tukey=whiten_tukey,
-                          whiten_tukey_alpha=whiten_tukey_alpha,
-                          whiten_tukey_side=whiten_tukey_side,
-                          normalize=normalize,
-                          normalize_scale=normalize_scale)
+                          add_noise=add_noise)
     
     with Pool(processes=num_workers) as pool:
         if show_progress:
@@ -600,15 +546,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
                         val_split: float = 0.1,
                         show_progress: bool = True,
                         detectors: List[str] = None,
-                        add_noise: bool = True,
-                        whiten: bool = False,
-                        whiten_bandpass: bool = True,
-                        whiten_tukey: bool = True,
-                        whiten_tukey_alpha: float = 0.1,
-                        whiten_tukey_side: str = 'left',
-                        normalize: bool = False,
-                        normalize_scale: float = 100.0,
-                        resample_rate: float = None) -> Dict:
+                        add_noise: bool = True) -> Dict:
     """
     Generate PyCBC waveforms projected to detectors.
     Returns PyTorch DataLoaders for training, validation, and testing.
@@ -655,30 +593,6 @@ def pycbc_data_generator(config: Dict[str, Callable],
         Detector names. Default: ['H1', 'L1']
     add_noise : bool
         Whether to add detector noise to signals. Default: True
-    whiten : bool
-        Apply PSD-based whitening to signals. Default: False
-    whiten_bandpass : bool
-        Apply 35-300 Hz bandpass filter after whitening. Default: True
-        Only used if whiten=True
-    whiten_tukey : bool
-        Apply Tukey window before whitening to prevent edge effects. Default: True
-        Smoothly tapers signal edges to zero, eliminating filter ringing
-    whiten_tukey_alpha : float
-        Tukey window alpha parameter - fraction of signal to taper. Default: 0.1
-        0.1 means 5% tapered on each edge, 90% flat in middle
-    whiten_tukey_side : str
-        Which side(s) to apply the Tukey taper. Default: 'left'
-        - 'left': Only taper the beginning (preserves merger at end)
-        - 'right': Only taper the end
-        - 'both': Taper both sides (standard Tukey window)
-    normalize : bool
-        Apply fixed-scale normalization to signals. Default: False
-    normalize_scale : float
-        Fixed scaling factor for normalization. Default: 100.0
-        Critical: Use FIXED scale to preserve relative amplitudes for LSTM training
-    resample_rate : float, optional
-        Target sampling rate in Hz for resampling. If None, no resampling.
-        Default: None
 
     Returns
     -------
@@ -700,17 +614,6 @@ def pycbc_data_generator(config: Dict[str, Callable],
     if train_split + val_split >= 1:
         raise ValueError("train_split + val_split must be < 1")
 
-    # Validate preprocessing parameters
-    if whiten and not add_noise:
-        warnings.warn("Whitening without noise may produce unrealistic PSDs")
-    if normalize and normalize_scale <= 0:
-        raise ValueError("normalize_scale must be positive")
-    if resample_rate is not None:
-        original_rate = 1.0 / time_resolution
-        if resample_rate > original_rate:
-            warnings.warn(f"Upsampling from {original_rate}Hz to {resample_rate}Hz - "
-                         "this does not add information")
-    
     if num_workers is None:
         num_workers = 1
     
@@ -756,12 +659,8 @@ def pycbc_data_generator(config: Dict[str, Callable],
             print(f"\nChunk {chunk_idx + 1}/{num_chunks} ({len(chunk_params)} waveforms)...")
 
         # Generate waveforms with detector projection at fixed length
-        # Whitening and normalization are applied in parallel for better performance
         chunk_results = _generate_waveforms_parallel(
-            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise,
-            whiten=whiten, whiten_bandpass=whiten_bandpass, whiten_tukey=whiten_tukey,
-            whiten_tukey_alpha=whiten_tukey_alpha, whiten_tukey_side=whiten_tukey_side,
-            normalize=normalize, normalize_scale=normalize_scale
+            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise
         )
         
         # Single pass: separate and accumulate
@@ -793,17 +692,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
     print(f"  Detector channels: {detector_names}")
     print(f"  All signals fixed to: {target_length} samples ({signal_length}s)")
 
-    # Compute final length accounting for resampling
-    final_length = target_length
-    if resample_rate is not None:
-        original_rate = 1.0 / time_resolution
-        target_delta_t = 1.0 / resample_rate
-        original_length_seconds = target_length * time_resolution
-        final_length = int(original_length_seconds / target_delta_t)
-        print(f"  Resampling enabled: {original_rate}Hz → {resample_rate}Hz")
-        print(f"  Final length: {final_length} samples")
-
-    # Pre-allocate arrays at ORIGINAL size for extraction
+    # Pre-allocate arrays
     signal_array = np.empty((num_success, num_detectors, target_length), dtype=np.float32)
     param_array = np.empty((num_success, num_params), dtype=np.float32)
 
@@ -819,33 +708,6 @@ def pycbc_data_generator(config: Dict[str, Callable],
         for k, det_name in enumerate(detector_names):
             # TimeSeries objects support array protocol, direct assignment is efficient
             signal_array[i, k, :] = waveform_data['detectors'][det_name]
-
-    # Whitening and normalization are now done in parallel during generation
-    # Only resampling needs to be done here (if requested)
-    if resample_rate:
-        from data_generator import resample_waveform
-
-        print(f"  Applying resampling: {1.0/time_resolution:.0f}Hz → {resample_rate}Hz...")
-
-        # Create new array at final size
-        signal_array_resampled = np.empty((num_success, num_detectors, final_length), dtype=np.float32)
-
-        # Resample each waveform
-        for i in range(num_success):
-            for j in range(num_detectors):
-                waveform = signal_array[i, j, :]
-                target_delta_t = 1.0 / resample_rate
-                resampled = resample_waveform(
-                    waveform,
-                    original_delta_t=time_resolution,
-                    target_delta_t=target_delta_t,
-                    apply_tukey=whiten_tukey,
-                    tukey_alpha=whiten_tukey_alpha,
-                    tukey_side=whiten_tukey_side
-                )
-                signal_array_resampled[i, j, :] = resampled
-
-        signal_array = signal_array_resampled
 
     print(f"  Converting to PyTorch tensors...")
 
@@ -898,17 +760,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
             'chunk_size': chunk_size,
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
-            'preprocessing': {
-                'whitened': whiten,
-                'whiten_f_lower': f_lower if whiten else None,
-                'whiten_bandpass': whiten_bandpass if whiten else None,
-                'normalized': normalize,
-                'normalize_scale': normalize_scale if normalize else None,
-                'resampled': resample_rate is not None,
-                'original_rate': 1.0 / time_resolution if resample_rate else None,
-                'resample_rate': resample_rate,
-                'final_length_samples': final_length,
-            }
+            'preprocessing': {}
         }
     }
 
@@ -1343,6 +1195,313 @@ def truncate_dataloaders(result: Dict,
     print(f"\nNew DataLoaders created:")
     print(f"  Waveform shape: {new_metadata['waveform_shape']}")
     print(f"  Duration: {new_duration:.3f}s")
+    print(f"  Batch size: {batch_size}")
+
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': new_metadata
+    }
+
+
+def _whiten_single_waveform(args):
+    """Worker function for parallel whitening."""
+    from data_generator import whiten_waveform
+    waveform, delta_t, f_lower, apply_bandpass, apply_tukey, tukey_alpha, tukey_side = args
+    whitened, _, _ = whiten_waveform(
+        waveform,
+        delta_t=delta_t,
+        f_lower=f_lower,
+        apply_bandpass=apply_bandpass,
+        apply_tukey=apply_tukey,
+        tukey_alpha=tukey_alpha,
+        tukey_side=tukey_side
+    )
+    return whitened
+
+
+def whiten_dataloaders(result: Dict,
+                       f_lower: float = 20.0,
+                       apply_bandpass: bool = True,
+                       apply_tukey: bool = True,
+                       tukey_alpha: float = 0.1,
+                       tukey_side: str = 'left',
+                       batch_size: int = None,
+                       preserve_splits: bool = True,
+                       num_workers: int = 1,
+                       show_progress: bool = True) -> Dict:
+    """
+    Whiten all waveforms in a DataLoader result.
+
+    This function extracts waveforms from existing DataLoaders, applies PSD-based
+    whitening using the whiten_waveform() function, and repackages them into
+    new DataLoaders with updated metadata.
+
+    Parameters
+    ----------
+    result : dict
+        Result dictionary from pycbc_data_generator() or load_dataloaders()
+        Must contain 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    f_lower : float
+        Lower frequency cutoff in Hz. Default: 20.0
+    apply_bandpass : bool
+        Apply 35-300 Hz bandpass filter after whitening. Default: True
+    apply_tukey : bool
+        Apply Tukey window before whitening to prevent edge effects. Default: True
+    tukey_alpha : float
+        Tukey window alpha parameter - fraction of signal to taper. Default: 0.1
+    tukey_side : str
+        Which side(s) to apply the Tukey taper. Default: 'left'
+        - 'left': Only taper the beginning (preserves merger at end)
+        - 'right': Only taper the end
+        - 'both': Taper both sides (standard Tukey window)
+    batch_size : int, optional
+        Batch size for new DataLoaders. If None, uses original batch_size
+    preserve_splits : bool
+        If True, maintains original train/val/test splits. Default: True
+    num_workers : int
+        Number of parallel workers for whitening. Default: 1
+    show_progress : bool
+        Show progress bar during whitening. Default: True
+
+    Returns
+    -------
+    dict
+        New DataLoader result with whitened data, same structure as input
+    """
+    # Extract metadata
+    metadata = result['metadata'].copy()
+    delta_t = metadata['time_resolution']
+
+    print(f"Whitening DataLoaders...")
+    print(f"  f_lower: {f_lower} Hz")
+    print(f"  Bandpass: {apply_bandpass}")
+    print(f"  Tukey window: {apply_tukey} (alpha={tukey_alpha}, side={tukey_side})")
+
+    # Extract data from DataLoaders
+    train_dataset = result['train_loader'].dataset
+    val_dataset = result['val_loader'].dataset
+    test_dataset = result['test_loader'].dataset
+
+    # Get base dataset (unwrap from Subset)
+    base_dataset = train_dataset.dataset
+    X_full = base_dataset.tensors[0]  # (N, num_detectors, time_length)
+    y_full = base_dataset.tensors[1]  # (N, num_params)
+
+    # Get split indices
+    train_indices = train_dataset.indices
+    val_indices = val_dataset.indices
+    test_indices = test_dataset.indices
+
+    num_samples = X_full.shape[0]
+    num_detectors = X_full.shape[1]
+    time_length = X_full.shape[2]
+
+    print(f"  Processing {num_samples} waveforms x {num_detectors} detectors...")
+
+    # Pre-allocate output tensor
+    X_whitened = torch.zeros_like(X_full)
+
+    # Prepare arguments for parallel processing
+    all_args = []
+    for i in range(num_samples):
+        for j in range(num_detectors):
+            waveform = X_full[i, j, :].numpy()
+            all_args.append((waveform, delta_t, f_lower, apply_bandpass, apply_tukey, tukey_alpha, tukey_side))
+
+    # Process in parallel or single-threaded
+    if num_workers > 1:
+        import multiprocessing as mp
+        # Use spawn to avoid issues with forking and PyCBC/scipy
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(processes=num_workers) as pool:
+            if show_progress:
+                results = list(tqdm(
+                    pool.imap(_whiten_single_waveform, all_args, chunksize=10),
+                    total=len(all_args),
+                    desc="Whitening"
+                ))
+            else:
+                results = list(pool.imap(_whiten_single_waveform, all_args, chunksize=10))
+    else:
+        # Single-threaded
+        if show_progress:
+            results = [_whiten_single_waveform(args) for args in tqdm(all_args, desc="Whitening")]
+        else:
+            results = [_whiten_single_waveform(args) for args in all_args]
+
+    # Reshape results back into tensor
+    idx = 0
+    for i in range(num_samples):
+        for j in range(num_detectors):
+            X_whitened[i, j, :] = torch.from_numpy(results[idx])
+            idx += 1
+
+    print(f"  Whitening complete!")
+
+    # Create new dataset
+    new_dataset = TensorDataset(X_whitened, y_full)
+
+    # Create subsets with preserved indices
+    if preserve_splits:
+        train_data = Subset(new_dataset, train_indices)
+        val_data = Subset(new_dataset, val_indices)
+        test_data = Subset(new_dataset, test_indices)
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+    else:
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+        train_data, val_data, test_data = random_split(
+            new_dataset, [train_size, val_size, test_size]
+        )
+
+    # Determine batch size
+    if batch_size is None:
+        batch_size = metadata.get('batch_size', 256)
+
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+
+    # Update metadata
+    new_metadata = metadata.copy()
+    new_metadata['batch_size'] = batch_size
+    new_metadata['train_size'] = train_size
+    new_metadata['val_size'] = val_size
+    new_metadata['test_size'] = test_size
+
+    # Update preprocessing info
+    if 'preprocessing' not in new_metadata:
+        new_metadata['preprocessing'] = {}
+
+    new_metadata['preprocessing'] = new_metadata['preprocessing'].copy()
+    new_metadata['preprocessing']['whitened'] = True
+    new_metadata['preprocessing']['whiten_f_lower'] = f_lower
+    new_metadata['preprocessing']['whiten_bandpass'] = apply_bandpass
+    new_metadata['preprocessing']['whiten_tukey'] = apply_tukey
+    new_metadata['preprocessing']['whiten_tukey_alpha'] = tukey_alpha
+    new_metadata['preprocessing']['whiten_tukey_side'] = tukey_side
+
+    print(f"\nNew DataLoaders created:")
+    print(f"  Waveform shape: {new_metadata['waveform_shape']}")
+    print(f"  Batch size: {batch_size}")
+
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': new_metadata
+    }
+
+
+def normalize_dataloaders(result: Dict,
+                          scale_factor: float = 1e21,
+                          batch_size: int = None,
+                          preserve_splits: bool = True) -> Dict:
+    """
+    Normalize all waveforms in a DataLoader result by multiplying by a scale factor.
+
+    This function extracts waveforms from existing DataLoaders, applies fixed-scale
+    normalization, and repackages them into new DataLoaders with updated metadata.
+
+    Parameters
+    ----------
+    result : dict
+        Result dictionary from pycbc_data_generator() or load_dataloaders()
+        Must contain 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    scale_factor : float
+        Fixed scaling factor to multiply waveforms by. Default: 1e21
+        (appropriate for typical GW strains of ~1e-21)
+    batch_size : int, optional
+        Batch size for new DataLoaders. If None, uses original batch_size
+    preserve_splits : bool
+        If True, maintains original train/val/test splits. Default: True
+
+    Returns
+    -------
+    dict
+        New DataLoader result with normalized data, same structure as input
+    """
+    # Extract metadata
+    metadata = result['metadata'].copy()
+
+    print(f"Normalizing DataLoaders...")
+    print(f"  Scale factor: {scale_factor:.2e}")
+
+    # Extract data from DataLoaders
+    train_dataset = result['train_loader'].dataset
+    val_dataset = result['val_loader'].dataset
+    test_dataset = result['test_loader'].dataset
+
+    # Get base dataset (unwrap from Subset)
+    base_dataset = train_dataset.dataset
+    X_full = base_dataset.tensors[0]  # (N, num_detectors, time_length)
+    y_full = base_dataset.tensors[1]  # (N, num_params)
+
+    # Get split indices
+    train_indices = train_dataset.indices
+    val_indices = val_dataset.indices
+    test_indices = test_dataset.indices
+
+    num_samples = X_full.shape[0]
+
+    print(f"  Processing {num_samples} waveforms...")
+
+    # Apply normalization (simple multiplication, very fast)
+    X_normalized = X_full * scale_factor
+
+    print(f"  Normalization complete!")
+
+    # Create new dataset
+    new_dataset = TensorDataset(X_normalized, y_full)
+
+    # Create subsets with preserved indices
+    if preserve_splits:
+        train_data = Subset(new_dataset, train_indices)
+        val_data = Subset(new_dataset, val_indices)
+        test_data = Subset(new_dataset, test_indices)
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+    else:
+        train_size = len(train_indices)
+        val_size = len(val_indices)
+        test_size = len(test_indices)
+        train_data, val_data, test_data = random_split(
+            new_dataset, [train_size, val_size, test_size]
+        )
+
+    # Determine batch size
+    if batch_size is None:
+        batch_size = metadata.get('batch_size', 256)
+
+    # Create DataLoaders
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+
+    # Update metadata
+    new_metadata = metadata.copy()
+    new_metadata['batch_size'] = batch_size
+    new_metadata['train_size'] = train_size
+    new_metadata['val_size'] = val_size
+    new_metadata['test_size'] = test_size
+
+    # Update preprocessing info
+    if 'preprocessing' not in new_metadata:
+        new_metadata['preprocessing'] = {}
+
+    new_metadata['preprocessing'] = new_metadata['preprocessing'].copy()
+    new_metadata['preprocessing']['normalized'] = True
+    new_metadata['preprocessing']['normalize_scale'] = scale_factor
+
+    print(f"\nNew DataLoaders created:")
+    print(f"  Waveform shape: {new_metadata['waveform_shape']}")
     print(f"  Batch size: {batch_size}")
 
     return {

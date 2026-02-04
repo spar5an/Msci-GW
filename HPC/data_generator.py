@@ -9,7 +9,6 @@ This module provides simple functions for processing single gravitational wave w
 All functions work on single 1D waveforms (not batches).
 """
 
-from JHPY import *
 import numpy as np
 import matplotlib.pyplot as plt
 from pycbc.types import TimeSeries, FrequencySeries
@@ -308,6 +307,8 @@ if __name__ == "__main__":
     """
     Example usage: Generate waveforms and demonstrate processing functions.
     """
+    # Import JHPY only for the demo (avoids circular import in multiprocessing)
+    from JHPY import pycbc_data_generator
 
     print("=" * 80)
     print("Waveform Processing Functions Demo")
