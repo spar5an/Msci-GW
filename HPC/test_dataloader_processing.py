@@ -133,19 +133,26 @@ def test_truncation(normalized_output):
 
 
 def test_resampling(raw_output):
-    """Test resampling on DataLoaders."""
+    """Test resampling on DataLoaders with parallel processing."""
     print("\n" + "="*60)
-    print("TEST 5: Resampling DataLoaders")
+    print("TEST 5: Resampling DataLoaders (Parallel)")
     print("="*60)
 
     original_rate = 1.0 / raw_output['metadata']['time_resolution']
     target_rate = original_rate / 2  # Downsample by 2x
 
     start = time.time()
-    resampled = resample_dataloaders(raw_output, target_sample_rate=target_rate)
+    resampled = resample_dataloaders(
+        raw_output,
+        target_sample_rate=target_rate,
+        num_workers=4,
+        apply_tukey=True,
+        tukey_side='left',
+        show_progress=False
+    )
     elapsed = time.time() - start
 
-    print(f"\n✓ Resampled in {elapsed:.2f}s")
+    print(f"\n✓ Resampled in {elapsed:.2f}s (parallel, 4 workers)")
     print(f"  Original rate: {original_rate:.0f} Hz")
     print(f"  New rate: {target_rate:.0f} Hz")
     print(f"  Original shape: {raw_output['metadata']['waveform_shape']}")
@@ -227,8 +234,8 @@ def test_save_load(output):
     return loaded
 
 
-def create_comparison_plot(raw_output, whitened_output, normalized_output):
-    """Create visualization comparing processing stages."""
+def create_comparison_plot(raw_output, whitened_output, normalized_output, resampled_output):
+    """Create visualization comparing processing stages including resampling."""
     print("\n" + "="*60)
     print("Creating Comparison Plot")
     print("="*60)
@@ -237,21 +244,27 @@ def create_comparison_plot(raw_output, whitened_output, normalized_output):
     raw_loader = raw_output['train_loader']
     whitened_loader = whitened_output['train_loader']
     normalized_loader = normalized_output['train_loader']
+    resampled_loader = resampled_output['train_loader']
 
     raw_batch, _ = next(iter(raw_loader))
     whitened_batch, _ = next(iter(whitened_loader))
     normalized_batch, _ = next(iter(normalized_loader))
+    resampled_batch, _ = next(iter(resampled_loader))
 
     # Extract single waveform from H1 detector
     raw_wave = raw_batch[0, 0, :].numpy()
     whitened_wave = whitened_batch[0, 0, :].numpy()
     normalized_wave = normalized_batch[0, 0, :].numpy()
+    resampled_wave = resampled_batch[0, 0, :].numpy()
 
     delta_t = raw_output['metadata']['time_resolution']
     time = np.arange(len(raw_wave)) * delta_t
 
-    # Create figure
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    resampled_delta_t = resampled_output['metadata']['time_resolution']
+    time_resampled = np.arange(len(resampled_wave)) * resampled_delta_t
+
+    # Create figure with 2x3 layout
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
 
     # Raw waveform
     axes[0, 0].plot(time, raw_wave, linewidth=0.5, color='steelblue')
@@ -268,29 +281,52 @@ def create_comparison_plot(raw_output, whitened_output, normalized_output):
     axes[0, 1].grid(True, alpha=0.3)
 
     # Normalized waveform
-    axes[1, 0].plot(time, normalized_wave, linewidth=0.5, color='green')
-    axes[1, 0].set_title('3. Normalized Waveform (x100)', fontweight='bold')
+    axes[0, 2].plot(time, normalized_wave, linewidth=0.5, color='green')
+    axes[0, 2].set_title('3. Normalized Waveform (x100)', fontweight='bold')
+    axes[0, 2].set_xlabel('Time (s)')
+    axes[0, 2].set_ylabel('Normalized Strain')
+    axes[0, 2].grid(True, alpha=0.3)
+
+    # Resampled waveform comparison
+    original_rate = 1.0 / delta_t
+    resampled_rate = 1.0 / resampled_delta_t
+    axes[1, 0].plot(time, raw_wave, linewidth=0.5, color='steelblue', alpha=0.7, label=f'Original ({original_rate:.0f} Hz)')
+    axes[1, 0].plot(time_resampled, resampled_wave, linewidth=0.8, color='red', label=f'Resampled ({resampled_rate:.0f} Hz)')
+    axes[1, 0].set_title('4. Resampling Comparison', fontweight='bold')
     axes[1, 0].set_xlabel('Time (s)')
-    axes[1, 0].set_ylabel('Normalized Strain')
+    axes[1, 0].set_ylabel('Strain')
+    axes[1, 0].legend(loc='upper left', fontsize=9)
     axes[1, 0].grid(True, alpha=0.3)
+
+    # Resampled waveform zoomed (last 0.1s to show merger)
+    zoom_start = max(0, len(time) - int(0.1 / delta_t))
+    zoom_start_resampled = max(0, len(time_resampled) - int(0.1 / resampled_delta_t))
+    axes[1, 1].plot(time[zoom_start:], raw_wave[zoom_start:], linewidth=0.8, color='steelblue', alpha=0.7, label='Original')
+    axes[1, 1].plot(time_resampled[zoom_start_resampled:], resampled_wave[zoom_start_resampled:], linewidth=1.0, color='red', linestyle='--', label='Resampled')
+    axes[1, 1].set_title('5. Resampling Zoom (last 0.1s)', fontweight='bold')
+    axes[1, 1].set_xlabel('Time (s)')
+    axes[1, 1].set_ylabel('Strain')
+    axes[1, 1].legend(loc='upper left', fontsize=9)
+    axes[1, 1].grid(True, alpha=0.3)
 
     # Statistics comparison
     stats_text = (
         f"Raw:\n"
-        f"  std = {raw_wave.std():.2e}\n"
-        f"  range = [{raw_wave.min():.2e}, {raw_wave.max():.2e}]\n\n"
+        f"  samples = {len(raw_wave)}\n"
+        f"  std = {raw_wave.std():.2e}\n\n"
         f"Whitened:\n"
-        f"  std = {whitened_wave.std():.2e}\n"
-        f"  range = [{whitened_wave.min():.2e}, {whitened_wave.max():.2e}]\n\n"
+        f"  std = {whitened_wave.std():.2e}\n\n"
         f"Normalized:\n"
-        f"  std = {normalized_wave.std():.2f}\n"
-        f"  range = [{normalized_wave.min():.2f}, {normalized_wave.max():.2f}]"
+        f"  std = {normalized_wave.std():.2f}\n\n"
+        f"Resampled:\n"
+        f"  samples = {len(resampled_wave)}\n"
+        f"  rate = {resampled_rate:.0f} Hz"
     )
-    axes[1, 1].text(0.1, 0.5, stats_text, transform=axes[1, 1].transAxes,
+    axes[1, 2].text(0.1, 0.5, stats_text, transform=axes[1, 2].transAxes,
                     fontsize=11, verticalalignment='center', fontfamily='monospace',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    axes[1, 1].set_title('Statistics Comparison', fontweight='bold')
-    axes[1, 1].axis('off')
+    axes[1, 2].set_title('Statistics Summary', fontweight='bold')
+    axes[1, 2].axis('off')
 
     plt.tight_layout()
     output_file = 'dataloader_processing_test.png'
@@ -319,8 +355,8 @@ if __name__ == "__main__":
     # Test save/load
     test_save_load(full_output)
 
-    # Create comparison plot
-    create_comparison_plot(raw, whitened, normalized)
+    # Create comparison plot (includes resampling)
+    create_comparison_plot(raw, whitened, normalized, resampled)
 
     print("\n" + "="*60)
     print("ALL TESTS PASSED!")
