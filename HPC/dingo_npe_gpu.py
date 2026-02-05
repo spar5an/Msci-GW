@@ -113,6 +113,7 @@ class AffineCouplingLayer(nn.Module):
     def __init__(self, dim, context_dim, hidden_dim=128, mask_type='half'):
         super().__init__()
         self.dim = dim
+        self.hidden_dim = hidden_dim  # Store for later access
         
         # Create mask (which dimensions to transform)
         self.register_buffer('mask', torch.zeros(dim))
@@ -767,17 +768,8 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
         samples = model.sample_posterior(data_tensor, num_samples=num_samples)
         samples = samples.cpu().numpy()  # [num_samples, param_dim]
     
-    # Apply inverse normalization to convert from [-1, 1] back to physical parameter space
-    # Use PHYSICAL BOUNDS (not data-dependent) for inference generalization
-    mass_min, mass_max = 1.0, 100.0
-    spin_min, spin_max = -1.0, 1.0
-    
-    samples_physical = samples.copy()
-    samples_physical[:, 0] = (samples[:, 0] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass1
-    samples_physical[:, 1] = (samples[:, 1] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass2
-    samples_physical[:, 2] = (samples[:, 2] + 1) / 2 * (spin_max - spin_min) + spin_min  # spin
-    
-    samples = samples_physical
+    # Samples are in normalized space (z-score) - keep them as-is
+    # No denormalization needed since we're comparing against normalized true values
     
     # For 1D parameters, flatten; for multi-D, keep as is
     if samples.shape[1] == 1:
@@ -822,60 +814,6 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
 # 
 # This architecture is similar to what's used in real gravitational-wave inference with DINGO!
 # ================================================================================
-
-
-pi = np.pi
-
-#Generate a list of 100 arrays, each with up to 5 frequencies
-def generate_frequency_arrays(num_arrays=100, max_length=5, freq_low=0.5, freq_high=5.0):
-    Frequencies_list = []
-    for i in range(num_arrays):
-        Frequency_list = []  # Create a new list for each row
-        for j in range(max_length):
-            freq_sample = np.round(np.random.uniform(freq_low, freq_high), 3)
-            Frequency_list.append(freq_sample)
-        
-        Frequencies_list.append(Frequency_list)
-    return np.array(Frequencies_list)
-
-
-# Function that sets certain values in selected lists to -1.0 (sentinel for "no frequency")
-# Using -1 instead of 0 because 0 is a valid frequency value the model could learn
-# -1 is physically meaningless for frequency, so it's unambiguous padding
-
-def zeroer(Frequencies_list, length, num_arrays):
-    """Pad frequency arrays with -1 (sentinel value for 'no frequency')"""
-    temp = int(num_arrays/length)
-    for i in range(length):
-    # Set elements (i+1): onwards to -1.0 for rows (i)*temp to (i+1)*temp
-        for row_idx in range(i*temp, (i+1)*temp):
-            for col_idx in range(i+1, length):
-                Frequencies_list[row_idx][col_idx] = -1.0
-    return Frequencies_list
-
-def key_information(Frequencies_list, length, num_arrays):
-    """Display information about frequency array padding with -1 sentinel"""
-    
-    # Display key information about the array
-    print(f"Frequencies_list shape: {Frequencies_list.shape}")
-    print(f"Total samples: {len(Frequencies_list)}")
-    # Note: -1 is used as padding marker (no frequency)
-    
-    # Determine number of modes from array shape
-    samples_per_mode = num_arrays // length
-    
-    # Display samples from each mode group
-    for mode_idx in range(length):
-        start_row = mode_idx * samples_per_mode
-        print(f"\n--- Rows {start_row}-{start_row+4} ({mode_idx+1}-mode samples) ---")
-        for i in range(start_row, start_row + 5):
-            print(f"Row {i}: {Frequencies_list[i]}")
-
-    # Verify padding pattern (count positive values as active modes)
-    mode_counts = np.sum(Frequencies_list > 0, axis=1)
-    for mode in range(1, length + 1):
-        count = np.sum(mode_counts == mode)
-        print(f"  {mode} mode(s): {count} samples ({100*count/num_arrays:.1f}%)")
 
 
 def prepare_pycbc_data(num_samples=10000):
@@ -951,46 +889,18 @@ def prepare_pycbc_data(num_samples=10000):
     return all_data, all_params, all_test_data, all_test_params
 
 
-#Generate a dataset of observed data for each frequency arrays
-def generate_observed_data_dataset(Frequencies_array):
-    observed_data_dataset = []
-        
-    #for i, freq_array in enumerate(Frequencies_array):
-    #    observed_data = simulate_variable_multifreq_decaying_sine_wave(freq_array, amp=1.0, phase=0.0, noise_std=0.1)
-    #    observed_data_dataset.append(observed_data)
-    
-    with Pool(processes = 4) as pool:
-        observed_data_dataset = pool.map(simulate_variable_multifreq_decaying_sine_wave, Frequencies_array)
 
-    return observed_data_dataset
-
-def prepare_for_training(frequencies_array, train_data):
-    # OPTIMIZATION: Use pin_memory for faster GPU transfer
-    train_params = torch.FloatTensor(frequencies_array).pin_memory()  # [N, 5]
-    train_data = torch.FloatTensor(np.array(train_data)).pin_memory()  # [N, 1000]
-    
-    print(f"Training data shapes:")
-    print(f"  Parameters: {train_params.shape} (samples × max_modes)")
-    print(f"  Data: {train_data.shape} (samples × timepoints)")
-    print(f"  Memory usage: ~{(train_params.numel() + train_data.numel()) * 4 / 1024 / 1024:.1f} MB\n")
-    
-    return train_params, train_data
-
+#Configure EVERYTHING -------------------------------------------------------------------------------------------------------------------------------------------
 
 # Configure training data size
 NUM_TRAINING_SAMPLES = 10000  # Adjust this to control dataset size
 
 pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
 
-# Apply fixed-domain parameter normalisation
-# IMPORTANT: These ranges MUST match the data generation ranges in prepare_pycbc_data()
-mass_min, mass_max = 10.0, 50.0      # Physical GW mass range [M_sun] - matches uniform(10, 50)
-spin_min, spin_max = -0.5, 0.5       # Spin range - matches uniform(-0.5, 0.5)
-
-pycbc_params_normalized = pycbc_params.clone()
-pycbc_params_normalized[:, 0] = 2 * (pycbc_params[:, 0] - mass_min) / (mass_max - mass_min) - 1  # mass1
-pycbc_params_normalized[:, 1] = 2 * (pycbc_params[:, 1] - mass_min) / (mass_max - mass_min) - 1  # mass2
-pycbc_params_normalized[:, 2] = 2 * (pycbc_params[:, 2] - spin_min) / (spin_max - spin_min) - 1  # spin
+# Parameters are already normalized by the data generator (z-score normalization)
+print(f"Using normalized parameters from data generator")
+print(f"  Training samples: {len(pycbc_params)}")
+print(f"  Test samples: {len(pycbc_test_params)}\n")
 
 
 # Model architecture parameters
@@ -998,7 +908,7 @@ PARAM_DIM = 3
 CONTEXT_DIM = 512           
 NUM_FLOW_LAYERS = 4         
 HIDDEN_DIM = 128            
-EMBEDDING_TYPE = 'conv1d'   
+EMBEDDING_TYPE = 'lstm'   
 
 # Training parameters
 NUM_EPOCHS = 30             
@@ -1022,7 +932,7 @@ print(f"Learning rate: {LEARNING_RATE}, Batch size: {BATCH_SIZE}\n")
 
 losses = train_dingo_model_pycbc(
     model, 
-    pycbc_params_normalized, 
+    pycbc_params,  # Already normalized by data generator
     pycbc_data, 
     num_epochs=NUM_EPOCHS,
     batch_size=BATCH_SIZE,
@@ -1033,9 +943,13 @@ print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
 print(f"Training on {len(pycbc_data)} samples for {NUM_EPOCHS} epochs\n")
 
 
-# TESTING PYCBC DATA INFERENCE ------------------------------------------------------------
+# TESTING PYCBC DATA INFERENCE ------------------------------------------------------------------------------------------------------------------------------------------------
 # with 1000 samples
 #finds differences between inferred mean and true value for each parameter for every sample
+#------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------
+#------------------------------------------------------------------------------------------------------------------------------------------------
 
 print("\n" + "=" * 80)
 print("TESTING PYCBC PARAMETER INFERENCE - 1000 SAMPLES")
@@ -1059,15 +973,9 @@ for i, test_idx in enumerate(test_indices):
     true_params = pycbc_test_params[test_idx].numpy()
     
     # Generate posterior samples (in normalized space)
-    posterior_samples_normalized, stats = infer_with_dingo(model, observed_data, num_samples=10000)
+    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000)
     
-    # CRITICAL: Denormalize posterior samples back to physical space
-    posterior_samples = np.zeros_like(posterior_samples_normalized)
-    posterior_samples[:, 0] = (posterior_samples_normalized[:, 0] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass1
-    posterior_samples[:, 1] = (posterior_samples_normalized[:, 1] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass2
-    posterior_samples[:, 2] = (posterior_samples_normalized[:, 2] + 1) / 2 * (spin_max - spin_min) + spin_min  # spin
-    
-    # Calculate mean differences
+    # Calculate mean differences (in normalized space)
     for param_idx in range(3):
         param_samples = posterior_samples[:, param_idx]
         true_val = true_params[param_idx]
