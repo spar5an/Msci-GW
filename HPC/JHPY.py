@@ -881,30 +881,10 @@ def load_dataloaders(load_path: str, batch_size: int = None, shuffle_train: bool
         'metadata': metadata
     }
 
-def _resample_single_waveform(args):
-    """Worker function for parallel resampling."""
-    from data_generator import resample_waveform
-    waveform, original_delta_t, target_delta_t, apply_tukey, tukey_alpha, tukey_side = args
-    resampled = resample_waveform(
-        waveform,
-        original_delta_t=original_delta_t,
-        target_delta_t=target_delta_t,
-        apply_tukey=apply_tukey,
-        tukey_alpha=tukey_alpha,
-        tukey_side=tukey_side
-    )
-    return resampled
-
-
 def resample_dataloaders(result: Dict,
                         target_sample_rate: float,
                         batch_size: int = None,
-                        preserve_splits: bool = True,
-                        apply_tukey: bool = True,
-                        tukey_alpha: float = 0.1,
-                        tukey_side: str = 'left',
-                        num_workers: int = 1,
-                        show_progress: bool = True) -> Dict:
+                        preserve_splits: bool = True) -> Dict:
     """
     Resample all waveforms in a DataLoader result to a different sampling rate.
 
@@ -923,19 +903,6 @@ def resample_dataloaders(result: Dict,
         Batch size for new DataLoaders. If None, uses original batch_size
     preserve_splits : bool
         If True, maintains original train/val/test splits. Default: True
-    apply_tukey : bool
-        Apply Tukey window before resampling to prevent edge effects. Default: True
-    tukey_alpha : float
-        Tukey window alpha parameter - fraction of signal to taper. Default: 0.1
-    tukey_side : str
-        Which side(s) to apply the Tukey taper. Default: 'left'
-        - 'left': Only taper the beginning (preserves merger at end)
-        - 'right': Only taper the end
-        - 'both': Taper both sides
-    num_workers : int
-        Number of parallel workers for resampling. Default: 1
-    show_progress : bool
-        Show progress bar during resampling. Default: True
 
     Returns
     -------
@@ -946,12 +913,14 @@ def resample_dataloaders(result: Dict,
     --------
     >>> # Generate data at 4096 Hz
     >>> result = pycbc_data_generator(config, num_samples=1000)
-    >>> # Resample to 2048 Hz with parallel processing
-    >>> result_2048 = resample_dataloaders(result, target_sample_rate=2048, num_workers=4)
+    >>> # Resample to 2048 Hz
+    >>> result_2048 = resample_dataloaders(result, target_sample_rate=2048)
     >>> # Or load from disk and resample
     >>> loaded = load_dataloaders('data.pt')
     >>> resampled = resample_dataloaders(loaded, target_sample_rate=1024)
     """
+    from data_generator import resample_waveform
+
     # Extract metadata
     metadata = result['metadata'].copy()
     original_delta_t = metadata['time_resolution']
@@ -959,7 +928,6 @@ def resample_dataloaders(result: Dict,
     target_delta_t = 1.0 / target_sample_rate
 
     print(f"Resampling DataLoaders from {original_rate:.0f} Hz to {target_sample_rate:.0f} Hz...")
-    print(f"  Tukey window: {apply_tukey} (alpha={tukey_alpha}, side={tukey_side})")
 
     # Extract indices from Subsets
     train_dataset = result['train_loader'].dataset
@@ -983,46 +951,28 @@ def resample_dataloaders(result: Dict,
     original_duration = original_length * original_delta_t
     new_length = int(original_duration / target_delta_t)
 
-    print(f"  Processing {num_samples} waveforms x {num_detectors} detectors...")
+    print(f"  Processing {num_samples} waveforms...")
     print(f"  Original: {original_length} samples/waveform")
     print(f"  New: {new_length} samples/waveform")
 
     # Pre-allocate new tensor
     X_resampled = torch.zeros(num_samples, num_detectors, new_length, dtype=torch.float32)
 
-    # Prepare arguments for parallel processing
-    all_args = []
+    # Resample all waveforms
     for i in range(num_samples):
         for j in range(num_detectors):
+            # Extract waveform as numpy array
             waveform = X_full[i, j, :].numpy()
-            all_args.append((waveform, original_delta_t, target_delta_t, apply_tukey, tukey_alpha, tukey_side))
 
-    # Process in parallel or single-threaded
-    if num_workers > 1:
-        import multiprocessing as mp
-        ctx = mp.get_context('spawn')
-        with ctx.Pool(processes=num_workers) as pool:
-            if show_progress:
-                results = list(tqdm(
-                    pool.imap(_resample_single_waveform, all_args, chunksize=10),
-                    total=len(all_args),
-                    desc="Resampling"
-                ))
-            else:
-                results = list(pool.imap(_resample_single_waveform, all_args, chunksize=10))
-    else:
-        # Single-threaded
-        if show_progress:
-            results = [_resample_single_waveform(args) for args in tqdm(all_args, desc="Resampling")]
-        else:
-            results = [_resample_single_waveform(args) for args in all_args]
+            # Resample using PyCBC
+            resampled = resample_waveform(
+                waveform,
+                original_delta_t=original_delta_t,
+                target_delta_t=target_delta_t
+            )
 
-    # Reshape results back into tensor
-    idx = 0
-    for i in range(num_samples):
-        for j in range(num_detectors):
-            X_resampled[i, j, :] = torch.from_numpy(results[idx])
-            idx += 1
+            # Store back in tensor
+            X_resampled[i, j, :] = torch.from_numpy(resampled)
 
     print(f"  Resampling complete!")
 
@@ -1074,9 +1024,6 @@ def resample_dataloaders(result: Dict,
     new_metadata['preprocessing']['original_rate'] = original_rate
     new_metadata['preprocessing']['resample_rate'] = target_sample_rate
     new_metadata['preprocessing']['final_length_samples'] = new_length
-    new_metadata['preprocessing']['resample_tukey'] = apply_tukey
-    new_metadata['preprocessing']['resample_tukey_alpha'] = tukey_alpha
-    new_metadata['preprocessing']['resample_tukey_side'] = tukey_side
 
     print(f"\nNew DataLoaders created:")
     print(f"  Sampling rate: {target_sample_rate:.0f} Hz")
