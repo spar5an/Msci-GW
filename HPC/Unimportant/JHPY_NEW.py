@@ -788,8 +788,8 @@ model = DINGOModel(
     context_dim=256,
     num_flow_layers=6,
     hidden_dim=128,
-    embedding='conv1d',
-    num_detectors=2
+    embedding='lstm',
+    num_detectors=1
 )
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = model.to(device)

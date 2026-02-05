@@ -251,7 +251,7 @@ class EmbeddingNetwork(nn.Module):
                 - If num_detectors > 1: [batch_size, num_detectors, data_dim]
 
         Returns:
-            context: embedded representation [batch_size, context_dim] 
+            context: embedded representation [batch_size, context_dim]
         """
         if self.num_detectors == 1:
             # Single detector case

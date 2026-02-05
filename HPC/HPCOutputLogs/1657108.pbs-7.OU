@@ -1,0 +1,142 @@
+=== DEBUG INFO ===
+hostname: cx3-20-1
+pwd: /rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC
+which python: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+Python 3.11.3
+=== Try importing pycbc in PBS job ===
+pycbc OK in PBS
+pycbc file: /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
+python exe: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+Host: cx3-20-1
+GPUs visible to CUDA:
+Wed Feb  4 19:12:25 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.82.07              Driver Version: 580.82.07      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    On  |   00000000:34:00.0 Off |                    0 |
+| N/A   36C    P8             33W /  350W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+=== Starting GPU Monitor (logging to gpu_monitor.log and gpu_data.csv) ===
+GPU monitor started with PID: 4089081
+=== Run dingo_npe_gpu.py ===
+Libraries imported successfully
+PyTorch version: 2.9.1+cu128
+Device: cuda
+  GPU: NVIDIA L40S
+  GPU Memory: 47.7 GB
+✓ Improved coupling layer with batch normalization defined
+✓ Normalizing flow defined
+✓ Embedding network defined
+
+Generating observed data for all frequency arrays...
+
+Calling pycbc_data_generator...
+Generating 5000 waveforms with projection to ['H1', 'L1']
+  Using default sky location: ra=0.0, dec=π/2 (north pole), psi=0.0
+
+Chunk 1/2 (2500 waveforms)...
+  Chunk: 2500 successful
+
+Chunk 2/2 (2500 waveforms)...
+  Chunk: 2500 successful
+
+Generation complete: 5000 successful, 0 failed
+
+Processing 5000 waveforms...
+  Detector channels: ['H1', 'L1']
+  Waveform lengths: min=1982, max=6835
+  WARNING: Variable lengths detected. Applying zero-padding.
+  Padding will be added at the beginning (before signal starts).
+  Target length: 6835
+  Normalizing waveforms...
+  Waveforms normalized to ~[-0.7, 0.7] range (max/sqrt(2))
+  Converting to PyTorch tensors...
+  Tensors: X=torch.Size([5000, 2, 6835]), y=torch.Size([5000, 3])
+  Splits: train=4000, val=500, test=500
+
+Ready! DataLoaders with batch_size=16
+✓ Data generator completed successfully
+Accessing dataloaders from result...
+✓ Got dataloaders: train=250 batches, val=32 batches, test=32 batches
+
+Processing training data from dataloaders...
+  Processing batch 0/250
+  Training data: torch.Size([4000, 6835]), params: torch.Size([4000, 3])
+
+Processing test data from dataloaders...
+  Processing test batch 0/32
+  Test data: torch.Size([500, 6835]), params: torch.Size([500, 3])
+✓ Data preparation complete
+
+Total parameters: 6,574,460
+Training with embedding regularization (weight=10.0, target context_std > 1.5)
+
+
+Training PyCBC DINGO model for 40 epochs...
+  Samples: 4000
+  Batch size: 64
+  Learning rate: 0.0001
+
+Epoch  10/40, Avg Log Prob: -0.4305, Best: -0.4305, Std: 0.1129, Context_std: 1.0389, LR: 8.55e-05, Patience: 0/20
+Epoch  20/40, Avg Log Prob: -0.2725, Best: -0.2725, Std: 0.1268, Context_std: 1.0914, LR: 5.05e-05, Patience: 0/20
+Epoch  30/40, Avg Log Prob: -0.2368, Best: -0.2334, Std: 0.1168, Context_std: 1.1214, LR: 1.55e-05, Patience: 0/20
+Epoch  40/40, Avg Log Prob: -0.2328, Best: -0.2160, Std: 0.1312, Context_std: 1.1253, LR: 1.00e-06, Patience: 0/20
+
+ LSTM-based training complete!
+
+================================================================================
+TESTING PYCBC PARAMETER INFERENCE - THREE SAMPLES
+================================================================================
+
+Test Sample 1 (index 0):
+  mass1:  39.12 M_sun
+  mass2:  22.99 M_sun
+  spin1z: 0.29
+  mass1   : True= 39.12, Mean= 30.02±14.07, Error=9.1077
+  mass2   : True= 22.99, Mean= 33.04±12.19, Error=10.0485
+  spin1z  : True=  0.29, Mean= -0.09± 0.28, Error=0.3791
+
+Test Sample 2 (index 250):
+  mass1:  15.70 M_sun
+  mass2:  43.75 M_sun
+  spin1z: 0.32
+  mass1   : True= 15.70, Mean= 30.55±14.05, Error=14.8468
+  mass2   : True= 43.75, Mean= 32.56±12.57, Error=11.1853
+  spin1z  : True=  0.32, Mean= -0.09± 0.29, Error=0.4094
+
+Test Sample 3 (index 499):
+  mass1:  23.57 M_sun
+  mass2:  37.99 M_sun
+  spin1z: -0.11
+  mass1   : True= 23.57, Mean= 30.46±13.65, Error=6.8931
+  mass2   : True= 37.99, Mean= 32.96±12.42, Error=5.0236
+  spin1z  : True= -0.11, Mean= -0.09± 0.30, Error=0.0208
+
+✓ Plot saved to: PyCBC_Parameter_Inference_Single_Test.png
+================================================================================
+=== Stopping GPU Monitor ===
+=== Generating GPU Usage Plot ===
+⚠ No valid GPU data found in CSV file
+=== Done ===
+
+====================================
+CPU Time used: 00:43:04
+CPU Percent: 102%
+Memory usage: 2145988kb
+Approx Power usage: 0.0086
+Walltime usage: 00:45:06
+
+====================================

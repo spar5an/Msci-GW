@@ -1,0 +1,145 @@
+=== DEBUG INFO ===
+hostname: cx3-20-2
+pwd: /rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC
+which python: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+Python 3.11.3
+=== Try importing pycbc in PBS job ===
+pycbc OK in PBS
+pycbc file: /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
+python exe: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+Host: cx3-20-2
+GPUs visible to CUDA:
+Wed Feb  4 20:49:38 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.82.07              Driver Version: 580.82.07      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    On  |   00000000:1A:00.0 Off |                    0 |
+| N/A   37C    P8             34W /  350W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+=== Starting GPU Monitor (logging to gpu_monitor.log and gpu_data.csv) ===
+GPU monitor started with PID: 8166
+=== Starting Training Monitor (logging to training_progress.log) ===
+Training monitor started with PID: 8167
+=== Run dingo_npe_sine.py ===
+/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_sine.py:583: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast():
+Libraries imported successfully
+PyTorch version: 2.9.1+cu128
+Device: cuda
+  GPU: NVIDIA L40S
+  GPU Memory: 47.7 GB
+✓ Improved coupling layer with batch normalization defined
+✓ Normalizing flow defined
+✓ Embedding network defined
+generating 100000 samples for training
+  Generated 2000/100000 simulations
+  Generated 4000/100000 simulations
+  Generated 6000/100000 simulations
+  Generated 8000/100000 simulations
+  Generated 10000/100000 simulations
+  Generated 12000/100000 simulations
+  Generated 14000/100000 simulations
+  Generated 16000/100000 simulations
+  Generated 18000/100000 simulations
+  Generated 20000/100000 simulations
+  Generated 22000/100000 simulations
+  Generated 24000/100000 simulations
+  Generated 26000/100000 simulations
+  Generated 28000/100000 simulations
+  Generated 30000/100000 simulations
+  Generated 32000/100000 simulations
+  Generated 34000/100000 simulations
+  Generated 36000/100000 simulations
+  Generated 38000/100000 simulations
+  Generated 40000/100000 simulations
+  Generated 42000/100000 simulations
+  Generated 44000/100000 simulations
+  Generated 46000/100000 simulations
+  Generated 48000/100000 simulations
+  Generated 50000/100000 simulations
+  Generated 52000/100000 simulations
+  Generated 54000/100000 simulations
+  Generated 56000/100000 simulations
+  Generated 58000/100000 simulations
+  Generated 60000/100000 simulations
+  Generated 62000/100000 simulations
+  Generated 64000/100000 simulations
+  Generated 66000/100000 simulations
+  Generated 68000/100000 simulations
+  Generated 70000/100000 simulations
+  Generated 72000/100000 simulations
+  Generated 74000/100000 simulations
+  Generated 76000/100000 simulations
+  Generated 78000/100000 simulations
+  Generated 80000/100000 simulations
+  Generated 82000/100000 simulations
+  Generated 84000/100000 simulations
+  Generated 86000/100000 simulations
+  Generated 88000/100000 simulations
+  Generated 90000/100000 simulations
+  Generated 92000/100000 simulations
+  Generated 94000/100000 simulations
+  Generated 96000/100000 simulations
+  Generated 98000/100000 simulations
+  Generated 100000/100000 simulations
+data generated
+model created
+  Total parameters: 4,719,804
+
+Training
+Training improved DINGO-style model for 200 epochs...
+
+Epoch 10/200, Avg Log Prob: 3.5031, Best: 3.5533, LR: 4.97e-04
+Epoch 20/200, Avg Log Prob: 4.8036, Best: 4.9878, LR: 4.88e-04
+Epoch 30/200, Avg Log Prob: 5.4524, Best: 5.6662, LR: 4.73e-04
+Epoch 40/200, Avg Log Prob: 5.9091, Best: 6.3336, LR: 4.53e-04
+Epoch 50/200, Avg Log Prob: 6.4429, Best: 6.7018, LR: 4.28e-04
+Epoch 60/200, Avg Log Prob: 6.9114, Best: 7.2173, LR: 3.98e-04
+Epoch 70/200, Avg Log Prob: 6.9552, Best: 7.2173, LR: 3.65e-04
+Epoch 80/200, Avg Log Prob: 7.1935, Best: 7.5262, LR: 3.29e-04
+Epoch 90/200, Avg Log Prob: 7.5081, Best: 7.5262, LR: 2.91e-04
+Epoch 100/200, Avg Log Prob: 7.1915, Best: 8.1885, LR: 2.52e-04
+Epoch 110/200, Avg Log Prob: 8.2293, Best: 8.2293, LR: 2.14e-04
+Epoch 120/200, Avg Log Prob: 8.3491, Best: 8.8337, LR: 1.76e-04
+Epoch 130/200, Avg Log Prob: 8.7382, Best: 8.9666, LR: 1.40e-04
+Epoch 140/200, Avg Log Prob: 9.1730, Best: 9.4366, LR: 1.07e-04
+Epoch 150/200, Avg Log Prob: 9.4287, Best: 9.4366, LR: 7.75e-05
+Epoch 160/200, Avg Log Prob: 10.0581, Best: 10.1252, LR: 5.23e-05
+Epoch 170/200, Avg Log Prob: 10.1821, Best: 10.3209, LR: 3.20e-05
+Epoch 180/200, Avg Log Prob: 10.4082, Best: 10.4082, LR: 1.71e-05
+Epoch 190/200, Avg Log Prob: 10.5147, Best: 10.5318, LR: 8.05e-06
+Epoch 200/200, Avg Log Prob: 10.5559, Best: 10.6175, LR: 5.00e-06
+
+ Training complete!
+Traceback (most recent call last):
+  File "/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_sine.py", line 1153, in <module>
+    #num_arrays = 100000 # How many samples
+                                   ^^^^^^^^^
+NameError: name 'generate_frequency_arrays' is not defined
+[W204 21:30:43.271155069 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())
+=== Stopping Monitors ===
+=== Generating GPU Usage Plot ===
+⚠ No valid GPU data found in CSV file
+=== Done ===
+
+====================================
+CPU Time used: 00:40:30
+CPU Percent: 102%
+Memory usage: 2603780kb
+Approx Power usage: 0.008
+Walltime usage: 00:41:47
+
+====================================

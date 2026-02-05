@@ -5,16 +5,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-plt.switch_backend('Agg')  # Non-interactive backend for HPC
 from scipy import stats
 import math
 import time
 from multiprocessing import Pool
-import data_generator_copy as data_generator
+#import data_generator
 
 # Set random seed for reproducibility
-#torch.manual_seed(42)
-#np.random.seed(42)
+torch.manual_seed(42)
+np.random.seed(42)
 
 print("Libraries imported successfully")
 print(f"PyTorch version: {torch.__version__}")
@@ -453,14 +452,11 @@ class DINGOModel(nn.Module):
     - GPU support for accelerated training
     """
     def __init__(self, data_dim=100, param_dim=1, context_dim=64, 
-                 num_flow_layers=6, hidden_dim=128, device=None, embedding_type='simple'):
+                 num_flow_layers=6, hidden_dim=128, device=None, use_conv1d=False, use_lstm=False):
         super().__init__()
         
-        # Store embedding type as attribute
-        self.embedding_type = embedding_type
-        
-        # Choose embedding architecture based on embedding_type
-        if embedding_type == 'lstm':
+        # Choose embedding architecture
+        if use_lstm and data_dim > 1000:
             # Use LSTM for large sequential data
             self.embedding_net = LSTMEmbeddingNetwork(
                 data_dim=data_dim,
@@ -468,14 +464,14 @@ class DINGOModel(nn.Module):
                 hidden_dim=256,
                 num_layers=2
             )
-        elif embedding_type == 'conv1d':
+        elif use_conv1d and data_dim > 1000:
             # Use Conv1D for large data
             self.embedding_net = Conv1DEmbeddingNetwork(
                 data_dim=data_dim,
                 context_dim=context_dim,
                 num_filters=[64, 128, 256]
             )
-        elif embedding_type == 'simple':
+        else:
             # Use fully-connected for small data
             self.embedding_net = nn.Sequential(
                 nn.Linear(data_dim, hidden_dim * 2),
@@ -488,8 +484,6 @@ class DINGOModel(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim * 2, context_dim)
             )
-        else:
-            raise ValueError(f"Unknown embedding_type: {embedding_type}. Must be 'simple', 'conv1d', or 'lstm'.")
         
         self.flow = NormalizingFlow(
             param_dim=param_dim,
@@ -531,7 +525,7 @@ class DINGOModel(nn.Module):
         return samples
 
 def train_dingo_model(model, train_amplitudes_and_phases, train_data, 
-                      num_epochs=100, batch_size=256, lr=3e-4, use_mixed_precision=True):
+                      num_epochs=100, batch_size=128, lr=3e-4, use_mixed_precision=True):
     """
     Train the DINGO-style model with improved optimization for multi-mode signals
     
@@ -607,8 +601,12 @@ def train_dingo_model(model, train_amplitudes_and_phases, train_data,
             
             optimizer.zero_grad()  # Moved after step for better GPU pipelining
             
-            epoch_loss += -loss.item()
+            batch_log_prob = -loss.item()
+            epoch_loss += batch_log_prob
             num_batches += 1
+            
+            # Print batch progress
+            print(f"Epoch {epoch+1:3d}/{num_epochs}, Batch {num_batches:3d}/{(num_simulations + batch_size - 1) // batch_size}, Log Prob: {batch_log_prob:7.4f}")
         
         avg_log_prob = epoch_loss / num_batches
         losses.append(avg_log_prob)
@@ -823,6 +821,122 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
 # This architecture is similar to what's used in real gravitational-wave inference with DINGO!
 # ================================================================================
 
+def simulate_sine_wave(frequency, num_points=1000, noise_std=0.1, amplitude=1.0, phase=0):
+    """
+    Generate a sine wave with given frequency and add noise
+    
+    Args:
+        frequency: frequency of sine wave (parameter we want to infer)
+        num_points: number of time points
+        noise_std: standard deviation of Gaussian noise
+        amplitude: fixed amplitude (default=1.0)
+        phase: phase shift (default=0)
+    
+    Returns:
+        observed_data: noisy sine wave observations
+    """
+    t = np.linspace(0, 6*pi, num_points)
+    signal = amplitude * np.sin(2*pi*frequency * t + phase)
+    noise = np.random.normal(0, noise_std, num_points)
+    observed_data = signal + noise
+    return observed_data
+
+def generate_frequency_training_data(num_simulations=10000, freq_low=0.5, freq_high=5.0, phase_low = -3, phase_high = 3, amplitude_low = 0.5, amplitude_high = 3.0):
+    
+    #Generate training dataset for frequency and phase inference
+    
+    print(f"generating {num_simulations} samples for training")
+    
+    train_frequencies = []
+    train_phases = []
+    train_amplitudes = []
+    train_data = []
+    
+    for i in range(num_simulations):
+        # Sample frequency and phase from prior
+        frequency = np.random.uniform(freq_low, freq_high)
+        phase = np.random.uniform(phase_low, phase_high)
+        amplitude = np.random.uniform(amplitude_low, amplitude_high)
+
+
+        # Simulate observed data
+        observed = simulate_sine_wave(frequency, amplitude=amplitude, phase=phase)
+        
+        train_frequencies.append(frequency)
+        train_phases.append(phase)
+        train_amplitudes.append(amplitude)
+        train_data.append(observed)
+        
+        if (i + 1) % 2000 == 0:
+            print(f"  Generated {i+1}/{num_simulations} simulations")
+    
+    train_frequencies = torch.FloatTensor(train_frequencies).unsqueeze(1)  # [N, 1]
+    train_phases = torch.FloatTensor(train_phases).unsqueeze(1)  # [N, 1]
+    train_amplitudes = torch.FloatTensor(train_amplitudes).unsqueeze(1)  # [N, 1]
+
+    train_params = torch.cat([train_frequencies, train_phases, train_amplitudes], dim=1)  # [N, 3]
+    train_data = torch.FloatTensor(np.array(train_data))  # [N, 1000]
+    
+    print(f"data generated")
+    
+    return train_params, train_data
+
+# Generate training data
+train_params, train_data = generate_frequency_training_data(num_simulations=10000)
+'''
+
+'''
+# Visualize frequency and phase distributions
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+axes[0].hist(train_params[:, 0].numpy(), bins=50, density=True, alpha=0.7, edgecolor='black')
+axes[0].set_title('Training Frequency Distribution', fontsize=12, fontweight='bold')
+axes[0].set_xlabel('Frequency')
+axes[0].set_ylabel('Density')
+axes[0].grid(True, alpha=0.3)
+
+axes[1].hist(train_params[:, 1].numpy(), bins=50, density=True, alpha=0.7, edgecolor='black', color='orange')
+axes[1].set_title('Training Phase Distribution', fontsize=12, fontweight='bold')
+axes[1].set_xlabel('Phase')
+axes[1].set_ylabel('Density')
+axes[1].grid(True, alpha=0.3)
+
+axes[2].hist(train_params[:, 1].numpy(), bins=50, density=True, alpha=0.7, edgecolor='black', color='orange')
+axes[2].set_title('Training Phase Distribution', fontsize=12, fontweight='bold')
+axes[2].set_xlabel('Phase')
+axes[2].set_ylabel('Density')
+axes[2].grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+'''
+
+
+# ================================================================================
+# ### Create and Train Frequency Model
+# ================================================================================
+
+
+'''
+freq_model = DINGOModel(
+    data_dim=1000,
+    param_dim=3,  # Now inferring frequency, phase, and amplitude
+    context_dim=128,
+    num_flow_layers=10,
+    hidden_dim=256
+)
+
+print("model created")
+print(f"  Total parameters: {sum(p.numel() for p in freq_model.parameters()):,}")
+
+print("\nTraining")
+freq_losses = train_dingo_model(
+    freq_model, 
+    train_params, 
+    train_data, 
+    num_epochs=25, 
+    batch_size=256,
+    lr=5e-4
+)
+'''
 
 pi = np.pi
 
@@ -877,20 +991,106 @@ def key_information(Frequencies_list, length, num_arrays):
         count = np.sum(mode_counts == mode)
         print(f"  {mode} mode(s): {count} samples ({100*count/num_arrays:.1f}%)")
 
+def simulate_variable_multifreq_sine_wave(frequencies, amp=1.0, phase=0, 
+                                          num_points=1000, noise_std=0.1):
+    """Generate sine wave from frequencies, ignoring padded (-1) entries"""
+    
+    t = np.linspace(0, 6*pi, num_points)
+    signal = np.zeros(num_points)
+    
+    for freq in frequencies:
+        if freq > 0.0:  # Only add positive frequencies (skip -1 padding markers)
+            signal += amp * np.sin(2*pi*freq * t + phase)
+    
+    noise = np.random.normal(0, noise_std, num_points)
+    observed_data = signal + noise
+    return observed_data
 
-def prepare_pycbc_data(num_samples=10000):
+def simulate_variable_multifreq_decaying_sine_wave(frequencies, amp=1.0, phase=0, 
+                                          num_points=1000, noise_std=0.1):
+    """Generate sine wave from frequencies, ignoring padded (-1) entries"""
+    
+    t = np.linspace(0, 6*pi, num_points)
+    signal = np.zeros(num_points)
+    decay_factor = np.random.uniform(0, 0.5)
+    decay = np.exp(-decay_factor * t )  # Exponential decay factor
+
+    for freq in frequencies:
+        if freq > 0.0:  # Only add positive frequencies (skip -1 padding markers)
+            signal += amp * decay * np.sin(2*pi*freq * t + phase)
+    
+    noise = np.random.normal(0, noise_std, num_points)
+    observed_data = signal + noise
+    return observed_data
+
+
+def simulate_variable_multifreq_decaying_inspiral_merger_sine_wave(amp=1.0, phase=0, 
+                                          num_points=1000, noise_std=0.1, num_arrays=100000, max_length=5):
+    #Simulate a wave with multiple frequencies, each with exponential decay, mimicking inspiral-merger behavior.
+    #The waveform is split into an inspiral phase (first half) and merger phase (second half).
+    #However, the connection between the two halves need to be smooth, so phase of merger section is adjusted appropriately
+
+    t = np.linspace(0, 6*pi, num_points)
+    signal = np.zeros(num_points)
+    decay_factor = np.random.uniform(0, 0.5)
+    growth_factor = np.random.uniform(0, 0.5)
+    decay = np.exp(-decay_factor * t )  # Exponential decay factor
+
+    mid_point = 6*pi / 2
+
+    non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=max_length, freq_low = 0.5, freq_high = 2.3)
+    Frequencies_array = zeroer(non_zeroed_frequencies_array, max_length, num_arrays)
+    selected_idx = np.random.randint(0, num_arrays)
+    selected_frequencies = Frequencies_array[selected_idx]
+    index = 0
+    while t[index] <= mid_point:
+        decay = 1  # No decay during inspiral phase
+
+        for freq in selected_frequencies:
+            if freq > 0.0:  # Only add positive frequencies (skip -1 padding markers)
+                signal += amp * decay * np.sin(2*pi*freq * t[index] + phase) 
+
+        Periods = (np.round((1/(selected_frequencies)), 6)*10**6).astype(int) # THIS MAY CAUSE ROUNDing ISSUES AT HIGHER FREQUENCIES
+        Period = 1
+        for i in Periods:
+            if i >= 0:
+                Period = math.lcm(Period, i)
+            else:
+                break
+        adjusted_phase = (t[np.where(t >= mid_point)[0][0]])/Period * 2 * pi  # Phase adjustment for merger section
+        index += 1
+
+    non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=max_length, freq_low = 2.4, freq_high = 5.0)
+    Frequencies_array = zeroer(non_zeroed_frequencies_array, max_length, num_arrays)
+    selected_frequencies = Frequencies_array[selected_idx]
+
+    #while index < len(t):
+    #    growth = np.exp(-growth_factor * t )  # Exponential decay factor during merger phase
+    #
+    #    for freq in selected_frequencies:
+    #        if freq > 0.0:  # Only add positive frequencies (skip -1 padding markers)
+    #            signal += amp * growth * np.sin(2*pi*freq * t + phase)
+    #    index += 1
+    
+    noise = np.random.normal(0, noise_std, num_points)
+    observed_data = signal + noise
+    return observed_data
+
+
+
+def prepare_pycbc_data():
     config = {
         'mass1': lambda size: np.random.uniform(10, 50, size=size),
         'mass2': lambda size: np.random.uniform(10, 50, size=size),
         'spin1z': lambda size: np.random.uniform(-0.5, 0.5, size=size),
     }
 
-    print(f"\nCalling pycbc_data_generator with {num_samples} samples...")
+    print("\nCalling pycbc_data_generator...")
     try:
         # Generate with H1 and L1 projection (default detectors)
         result = data_generator.pycbc_data_generator(
             config, 
-            num_samples=num_samples,
+            num_samples=100000,  # Increased for better learning
             batch_size=16, 
             num_workers=1,  # Minimum 1 worker required
             allow_padding=True,
@@ -950,6 +1150,37 @@ def prepare_pycbc_data(num_samples=10000):
 
     return all_data, all_params, all_test_data, all_test_params
 
+#num_arrays = 100000 # How many samples
+#length = 5 # Maximum number of modes
+
+'''
+non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=length)
+Frequencies_array = zeroer(non_zeroed_frequencies_array, length, num_arrays)
+
+#Now randomly pick an array from Frequencies_list and generate the observed data
+selected_idx = np.random.randint(0, num_arrays)
+selected_frequencies = Frequencies_array[selected_idx]
+
+key_information(non_zeroed_frequencies_array, length, num_arrays)
+
+
+#Now plot the observed data for the selected frequencies
+print(selected_frequencies)
+observed_variable_multifreq = simulate_variable_multifreq_decaying_inspiral_merger_sine_wave(amp=1.0, phase=0.0, noise_std=0.1)
+fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+t = np.linspace(0, 6*pi, 1000)
+ax.plot(t, observed_variable_multifreq, 'm-', alpha=0.7,
+        linewidth=1.5, label='Observed (with noise)')
+ax.axvline(6*pi/2, color='k', linestyle='--', label='Merger Start')
+ax.set_title(f'Variable Multi-Frequency Signal\nFrequencies: {selected_frequencies}', 
+             fontsize=14, fontweight='bold')
+ax.set_xlabel('Time')
+ax.set_ylabel('Value')
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+'''
 
 #Generate a dataset of observed data for each frequency arrays
 def generate_observed_data_dataset(Frequencies_array):
@@ -976,178 +1207,441 @@ def prepare_for_training(frequencies_array, train_data):
     
     return train_params, train_data
 
+# Generate frequency arrays for training
+#non_zeroed_frequencies_array = generate_frequency_arrays(num_arrays=num_arrays, max_length=length)
+#Frequencies_array = zeroer(non_zeroed_frequencies_array, length, num_arrays)
 
-# Configure training data size
-NUM_TRAINING_SAMPLES = 10000  # Adjust this to control dataset size
+print("\nGenerating sine wave training data...")
+try:
+    # Generate training data
+    sine_params, sine_data = generate_frequency_training_data(num_simulations=20000)
+    
+    # Split into train and test
+    num_train = int(0.9 * len(sine_params))
+    train_params = sine_params[:num_train]
+    train_data = sine_data[:num_train]
+    test_params = sine_params[num_train:]
+    test_data = sine_data[num_train:]
+    
+    print(f"✓ Generated {len(train_params)} training samples, {len(test_params)} test samples")
+except Exception as e:
+    print(f"\n{'='*60}")
+    print(f"FATAL ERROR in sine wave data generation")
+    print(f"{'='*60}")
+    print(f"Error: {e}")
+    import traceback
+    traceback.print_exc()
+    print(f"{'='*60}")
+    raise
 
-pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
-
-# Apply fixed-domain parameter normalisation
-# IMPORTANT: These ranges MUST match the data generation ranges in prepare_pycbc_data()
-mass_min, mass_max = 10.0, 50.0      # Physical GW mass range [M_sun] - matches uniform(10, 50)
-spin_min, spin_max = -0.5, 0.5       # Spin range - matches uniform(-0.5, 0.5)
-
-pycbc_params_normalized = pycbc_params.clone()
-pycbc_params_normalized[:, 0] = 2 * (pycbc_params[:, 0] - mass_min) / (mass_max - mass_min) - 1  # mass1
-pycbc_params_normalized[:, 1] = 2 * (pycbc_params[:, 1] - mass_min) / (mass_max - mass_min) - 1  # mass2
-pycbc_params_normalized[:, 2] = 2 * (pycbc_params[:, 2] - spin_min) / (spin_max - spin_min) - 1  # spin
+#print(f"  Ready for training with {len(variable_train_params)} variable-mode samples")
 
 
-# Model architecture parameters
-PARAM_DIM = 3               
-CONTEXT_DIM = 512           
-NUM_FLOW_LAYERS = 4         
-HIDDEN_DIM = 128            
-EMBEDDING_TYPE = 'conv1d'   
 
-# Training parameters
-NUM_EPOCHS = 30             
-BATCH_SIZE = 64            
-LEARNING_RATE = 1e-4        
 
-# Train DINGO model on PyCBC data
+# No normalization needed for sine wave parameters
+# Parameters are already in reasonable ranges:
+# frequency: [1, 10] Hz
+# phase: [0, 2π]
+# amplitude: [0.5, 2.0]
+
+# Train DINGO model on sine wave data
 model = DINGOModel(
-    data_dim=pycbc_data.shape[1],
-    param_dim=PARAM_DIM,
-    context_dim=CONTEXT_DIM,
-    num_flow_layers=NUM_FLOW_LAYERS,
-    hidden_dim=HIDDEN_DIM,
+    data_dim=1000,           # Sine wave length
+    param_dim=3,             # frequency, phase, amplitude
+    context_dim=512,         # Increased for better capacity
+    num_flow_layers=14,      # Increased for better posterior approximation
+    hidden_dim=256,
     device=DEVICE,
-    embedding_type=EMBEDDING_TYPE
+    use_conv1d=True,         # Conv1D is memory efficient
+    use_lstm=False           # LSTM causes OOM
 )
 
 print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-print(f"Training on {len(pycbc_data)} samples for {NUM_EPOCHS} epochs")
-print(f"Learning rate: {LEARNING_RATE}, Batch size: {BATCH_SIZE}\n")
-
+print("Training with embedding regularization (weight=10.0, target context_std > 1.5)\n")
 losses = train_dingo_model_pycbc(
     model, 
-    pycbc_params_normalized, 
-    pycbc_data, 
-    num_epochs=NUM_EPOCHS,
-    batch_size=BATCH_SIZE,
-    lr=LEARNING_RATE
+    pycbc_params,            # No normalization for sine params
+    pycbc_data,              # Sine wave data
+    num_epochs=40,
+    batch_size=64,
+    lr=1e-4
 )
 
-print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-print(f"Training on {len(pycbc_data)} samples for {NUM_EPOCHS} epochs\n")
+
+# ================================================================================
+# FOR VIEWING AMPLITUDE, FREQUENCY AND PHASE RESULTS
+# ================================================================================
+
+'''
+from matplotlib.patches import Rectangle # Rectangle where both axes' 1-sigma regions overlap
+
+# Test on several different true frequencies, phases, and amplitudes
+test_frequencies = [1.0, 2.5, 4.0]
+test_phases = [0.5, -0.3, 1.2]
+test_amplitudes = [1.0, 0.8, 2.4]
+
+fig, axes = plt.subplots(7, len(test_frequencies), figsize=(8*len(test_frequencies), 40))
+
+print("Testing frequency+phase+amplitude model on new observations:\n")
+
+for idx, true_freq in enumerate(test_frequencies):
+    true_phase = test_phases[idx]
+    true_amp = test_amplitudes[idx]
+    print(f"\nTest {idx+1}: True Frequency = {true_freq}, True Phase = {true_phase:.2f}, True Amplitude = {true_amp:.2f}")
+    
+    # Generate new observation
+    observed_data = simulate_sine_wave(true_freq, phase=true_phase, amplitude=true_amp)
+    
+    # Infer posterior
+    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=5000)
+    # posterior_samples shape is [num_samples, 3] with [frequency, phase, amplitude]
+    freq_samples = posterior_samples[:, 0]
+    phase_samples = posterior_samples[:, 1]
+    amp_samples = posterior_samples[:, 2]
+    
+    freq_stats = {
+        'mean': np.mean(freq_samples),
+        'median': np.median(freq_samples),
+        'std': np.std(freq_samples),
+        'q05': np.percentile(freq_samples, 5),
+        'q95': np.percentile(freq_samples, 95),
+    }
+    
+    phase_stats = {
+        'mean': np.mean(phase_samples),
+        'median': np.median(phase_samples),
+        'std': np.std(phase_samples),
+        'q05': np.percentile(phase_samples, 5),
+        'q95': np.percentile(phase_samples, 95),
+    }
+    
+    amp_stats = {
+        'mean': np.mean(amp_samples),
+        'median': np.median(amp_samples),
+        'std': np.std(amp_samples),
+        'q05': np.percentile(amp_samples, 5),
+        'q95': np.percentile(amp_samples, 95),
+    }
+    
+    parameters = ['frequency', 'phase', 'amplitude']
+    ps = ['f', 'φ', 'A']
+    samples_list = [freq_samples, phase_samples, amp_samples]
+    stats_list = [freq_stats, phase_stats, amp_stats]
+    true_list = [true_freq, true_phase, true_amp]
+
+    print(f"  Frequency posterior: mean={freq_stats['mean']:.3f} ± {freq_stats['std']:.3f}")
+    print(f"  Phase posterior:     mean={phase_stats['mean']:.3f} ± {phase_stats['std']:.3f}")
+    print(f"  Amplitude posterior: mean={amp_stats['mean']:.3f} ± {amp_stats['std']:.3f}")
+    
+    t = np.linspace(0, 6*pi, 1000)
+
+    # Plot observed data
+    axes[0, idx].plot(t, observed_data, 'b-', alpha=0.7, linewidth=1.5, label='Observed')
+    axes[0, idx].plot(t, true_amp * np.sin(2*pi*true_freq * t + true_phase), 'r--', 
+                      label=f'True (f={true_freq}, φ={true_phase:.2f}, A={true_amp:.2f})', linewidth=2)
+    axes[0, idx].set_title(f'Test {idx+1}: f={true_freq}, φ={true_phase:.2f}, A={true_amp:.2f}', fontsize=12, fontweight='bold')
+    axes[0, idx].set_xlabel('Time')
+    axes[0, idx].set_ylabel('Value')
+    axes[0, idx].legend(fontsize=8)
+    axes[0, idx].grid(True, alpha=0.3)
+
+    for idx2, _ in enumerate(parameters):
+        axes[idx2 + 1, idx].hist(samples_list[idx2], bins=60, density=True, 
+                      alpha=0.6, edgecolor='black', label='Posterior')
+        axes[idx2 + 1, idx].axvline(true_list[idx2], color='red', linestyle='--', 
+                             linewidth=2.5, label=f'True: {true_list[idx2]:.2f}', zorder=10)
+        axes[idx2 + 1, idx].axvline(stats_list[idx2]['mean'], color='green', linestyle='-', 
+                             linewidth=2.5, label=f"Mean: {stats_list[idx2]['mean']:.2f}", zorder=10)
+        axes[idx2 + 1, idx].axvspan(stats_list[idx2]['q05'], stats_list[idx2]['q95'], alpha=0.2, color='gray', label='90% CI')
+        axes[idx2 + 1, idx].set_title(f'p({parameters[idx2]} | data)', fontsize=12, fontweight='bold')
+        axes[idx2 + 1, idx].set_xlabel(parameters[idx2].capitalize())
+        axes[idx2 + 1, idx].set_ylabel('Density')
+        axes[idx2 + 1, idx].legend(loc='upper right', fontsize=8)
+        axes[idx2 + 1, idx].grid(True, alpha=0.3)
 
 
-# TESTING PYCBC DATA INFERENCE ------------------------------------------------------------
-# with 1000 samples
-#finds differences between inferred mean and true value for each parameter for every sample
+    for idx2, _ in enumerate(parameters):
+        # 2D histograms for frequency vs. phase 
+        h = axes[len(parameters) + idx2 + 1, idx].hist2d(samples_list[idx2], samples_list[(idx2+1) % 3], bins=60, cmap='plasma', density=True)
+        plt.colorbar(h[3], ax=axes[len(parameters) + idx2 + 1, idx], label='Probability Density')
+        axes[len(parameters) + idx2 + 1, idx].scatter(true_list[idx2], true_list[(idx2+1) % 3], color='cyan', s=200, marker='x',  
+                            edgecolors='white', linewidth=2, label='True values', zorder=10) # Plot true values
+        axes[len(parameters) + idx2 + 1, idx].scatter(stats_list[idx2]['mean'], stats_list[(idx2+1) % 3]['mean'], color='lime', s=100, marker='o', 
+                            linewidth=3, label='Posterior mean', zorder=10) # Plot mean
+
+        rect = Rectangle((stats_list[idx2]['mean'] - stats_list[idx2]['std'], stats_list[(idx2+1) % 3]['mean'] - stats_list[(idx2+1) % 3]['std']), 
+                        width=2*stats_list[idx2]['std'], height=2*stats_list[(idx2+1) % 3]['std'],
+                        facecolor='yellow', edgecolor='yellow', linewidth=2, 
+                        alpha=0.3, label='1σ region', zorder=5)
+        
+        axes[len(parameters) + idx2 + 1, idx].add_patch(rect)
+        axes[len(parameters) + idx2 + 1, idx].set_xlabel(parameters[idx2], fontsize=12, fontweight='bold')
+        axes[len(parameters) + idx2 + 1, idx].set_ylabel(parameters[(idx2+1) % 3], fontsize=12, fontweight='bold')
+        axes[len(parameters) + idx2 + 1, idx].set_title(f'Joint Posterior p({ps[idx2]}, {ps[(idx2+1) % 3]} | data)\nTrue: {ps[idx2]}={true_list[idx2]}, {ps[(idx2+1) % 3]}={true_list[(idx2+1) % 3]}', fontsize=12, fontweight='bold')
+        axes[len(parameters) + idx2 + 1, idx].legend(loc='upper right', fontsize=8)
+        axes[len(parameters) + idx2 + 1, idx].grid(True, alpha=0.3)
+
+    
+plt.tight_layout()
+plt.show()
+
+'''
+
+
+
+# ================================================================================
+# FOR VIEWING FREQUENCY ONLY TESTS
+# ================================================================================
+'''
+
+print("="*80)
+print("TESTING VARIABLE-MODE FREQUENCY INFERENCE (1-5 Modes)")
+print("="*80)
+print("\nNote: Training used -1 as padding marker (meaning 'no frequency')")
+print("This prevents the model from thinking 0 is a valid frequency value")
+
+# Test different numbers of active modes
+# Note: Using -1 as padding marker (tells model "no frequency here")
+test_cases = [
+    {
+        'name': '1-Mode Signal',
+        'frequencies': [2.0, -1.0, -1.0, -1.0, -1.0],
+        'num_samples': 5000
+    },
+    {
+        'name': '2-Mode Signal',
+        'frequencies': [1.5, 3.0, -1.0, -1.0, -1.0],
+        'num_samples': 5000
+    },
+    {
+        'name': '3-Mode Signal',
+        'frequencies': [1.0, 2.5, 4.0, -1.0, -1.0],
+        'num_samples': 5000
+    },
+    {
+        'name': '4-Mode Signal',
+        'frequencies': [0.8, 2.0, 3.5, 4.5, -1.0],
+        'num_samples': 5000
+    },
+    {
+        'name': '5-Mode Signal',
+        'frequencies': [0.6, 1.5, 2.8, 4.0, 4.8],
+        'num_samples': 5000
+    }
+]
+
+fig, axes = plt.subplots(len(test_cases), 2, figsize=(14, 4*len(test_cases)))
+
+print("\nTesting variable-mode frequency model on new observations:\n")
+
+for test_idx, test_case in enumerate(test_cases):
+    true_freqs = np.array(test_case['frequencies'])
+    num_active = np.sum(true_freqs > 0)
+    
+    print(f"\n{'='*60}")
+    print(f"Test {test_idx+1}: {test_case['name']}")
+    print(f"True frequencies: {true_freqs}")
+    print(f"Active modes: {num_active}")
+    print(f"{'='*60}")
+    
+    # Generate signal from true frequencies
+    observed_data = simulate_variable_multifreq_decaying_sine_wave(true_freqs, amp=1.0, phase=0.0, noise_std=0.1)
+    
+    # Infer posterior
+    model.eval()
+    with torch.no_grad():
+        data_tensor = torch.FloatTensor(observed_data).unsqueeze(0).to(DEVICE)
+        context = model.embedding_net(data_tensor)
+        posterior_samples = model.flow.sample(context, num_samples=test_case['num_samples']).cpu().numpy()
+
+    #posterior_samples, _ = infer_with_dingo(model, observed_data, num_samples=test_case['num_samples'])[0]
+
+    # Plot 1: Observed signal
+    t = np.linspace(0, 6*pi, 1000)
+    axes[test_idx, 0].plot(t, observed_data, 'b-', alpha=0.7, linewidth=1.5)
+    axes[test_idx, 0].set_title(f'{test_case["name"]}\nObserved Signal', fontsize=12, fontweight='bold')
+    axes[test_idx, 0].set_xlabel('Time')
+    axes[test_idx, 0].set_ylabel('Amplitude')
+    axes[test_idx, 0].grid(True, alpha=0.3)
+    
+    # Plot 2: Combined histogram of all inferred frequencies
+    # KEY FIX: Filter out negative samples (model's way of saying "no frequency here")
+    ax = axes[test_idx, 1]
+    
+    # Collect all frequency samples and filter out negatives
+    all_samples_raw = posterior_samples.flatten()
+    all_samples = all_samples_raw[all_samples_raw > 0]  # Only keep positive frequencies
+    
+    # Plot histogram
+    ax.hist(all_samples, bins=100, density=True, alpha=0.6, edgecolor='black', color='skyblue', label='Inferred frequencies (>0)')
+    
+    # Mark true frequencies as vertical lines
+    for freq_idx, true_val in enumerate(true_freqs):
+        if true_val > 0:
+            ax.axvline(true_val, color='red', linestyle='--', linewidth=2.5, alpha=0.8, label=f'True frequencies ({num_active} active)')
+    
+    ax.set_title(f'Combined Posterior Distribution\n(Negative values filtered out)', fontsize=12, fontweight='bold')
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('Density')
+    ax.legend(fontsize=10, loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    # Print summary statistics
+    num_negatives = np.sum(all_samples_raw < 0)
+    num_positives = np.sum(all_samples_raw > 0)
+    
+    print(f"\n  Sample distribution:")
+    print(f"    Negative samples (padding): {num_negatives} / {len(all_samples_raw)} ({100*num_negatives/len(all_samples_raw):.1f}%)")
+    print(f"    Positive samples (real):    {num_positives} / {len(all_samples_raw)} ({100*num_positives/len(all_samples_raw):.1f}%)")
+    
+    if len(all_samples) > 0:
+        print(f"\n  Positive frequency statistics:")
+        print(f"    Mean: {np.mean(all_samples):.2f}")
+        print(f"    Std Dev: {np.std(all_samples):.2f}")
+        print(f"    Min: {np.min(all_samples):.2f}")
+        print(f"    Max: {np.max(all_samples):.2f}")
+    
+    # Per-parameter summary
+    print(f"\n  Per-parameter summary:")
+    for param_idx in range(5):
+        param_samples = posterior_samples[:, param_idx]
+        param_mean = np.mean(param_samples)
+        param_std = np.std(param_samples)
+        true_val = true_freqs[param_idx]
+        status = 'ACTIVE' if true_val > 0 else 'padded'
+        
+        if true_val > 0:
+            error = abs(param_mean - true_val)
+            print(f"    Freq {param_idx+1} ({status:7s}): True={true_val:.2f}, Inferred={param_mean:.2f}±{param_std:.2f}, Error={error:.4f}")
+        else:
+            print(f"    Freq {param_idx+1} ({status:7s}): Inferred={param_mean:.2f}±{param_std:.2f} (should be negative)")
+
+plt.tight_layout()
+plt.savefig("Plots/Variable_Mode_Frequency_Inference_Tests.png")
+
+'''
+
+# ================================================================================
+# TESTING SINE WAVE INFERENCE - THREE SAMPLE TEST
+# ================================================================================
 
 print("\n" + "=" * 80)
-print("TESTING PYCBC PARAMETER INFERENCE - 1000 SAMPLES")
+print("TESTING SINE WAVE PARAMETER INFERENCE - THREE SAMPLES")
 print("=" * 80)
 
-# Test on 1000 samples from the test set
-num_test_samples = min(1000, len(pycbc_test_data))
-test_indices = list(range(num_test_samples))
+# Test on three samples from the test set
+num_test_samples = 3
+test_indices = [0, len(test_data)//2, len(test_data)-1]  # First, middle, last
 
-# Collect mean differences for all samples
-param_names = ['mass1', 'mass2', 'spin1z']
-mean_errors = {param: [] for param in param_names}
-mean_differences = {param: [] for param in param_names}
+# Collect posteriors for all three samples
+all_posteriors = []
+all_true_params = []
 
-print(f"\nInferring posteriors for {num_test_samples} test samples...")
 for i, test_idx in enumerate(test_indices):
-    if i % 100 == 0:
-        print(f"  Processing sample {i+1}/{num_test_samples}")
+    observed_data = test_data[test_idx].numpy()
+    true_params = test_params[test_idx].numpy()
     
-    observed_data = pycbc_test_data[test_idx].numpy()
-    true_params = pycbc_test_params[test_idx].numpy()
+    print(f"\nTest Sample {i+1} (index {test_idx}):")
+    print(f"  frequency: {true_params[0]:.2f} Hz")
+    print(f"  phase:     {true_params[1]:.2f} rad")
+    print(f"  amplitude: {true_params[2]:.2f}")
     
-    # Generate posterior samples (in normalized space)
-    posterior_samples_normalized, stats = infer_with_dingo(model, observed_data, num_samples=10000)
+    # Generate posterior samples
+    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000)
+    all_posteriors.append(posterior_samples)
+    all_true_params.append(true_params)
     
-    # CRITICAL: Denormalize posterior samples back to physical space
-    posterior_samples = np.zeros_like(posterior_samples_normalized)
-    posterior_samples[:, 0] = (posterior_samples_normalized[:, 0] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass1
-    posterior_samples[:, 1] = (posterior_samples_normalized[:, 1] + 1) / 2 * (mass_max - mass_min) + mass_min  # mass2
-    posterior_samples[:, 2] = (posterior_samples_normalized[:, 2] + 1) / 2 * (spin_max - spin_min) + spin_min  # spin
-    
-    # Calculate mean differences
+    # Print statistics
+    param_names = ['frequency', 'phase', 'amplitude']
     for param_idx in range(3):
         param_samples = posterior_samples[:, param_idx]
         true_val = true_params[param_idx]
         inferred_mean = np.mean(param_samples)
-        error = inferred_mean - true_val  # Signed difference
-        abs_error = abs(error)
+        inferred_std = np.std(param_samples)
+        error = abs(inferred_mean - true_val)
+        print(f"  {param_names[param_idx]:<10s}: True={true_val:6.2f}, Mean={inferred_mean:6.2f}±{inferred_std:5.2f}, Error={error:6.4f}")
+
+# Create combined visualization
+fig = plt.figure(figsize=(18, 16))
+gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.3, height_ratios=[1, 1, 1, 1])
+
+# Top row, left: Training curve
+ax_train = fig.add_subplot(gs[0, :2])  # Span first 2 columns
+ax_train.plot(losses, linewidth=2, color='steelblue', marker='o', markersize=4)
+ax_train.set_title('Training Progress: Average Log Probability', fontsize=13, fontweight='bold')
+ax_train.set_xlabel('Epoch', fontsize=11)
+ax_train.set_ylabel('Log Probability', fontsize=11)
+ax_train.grid(True, alpha=0.3)
+
+# Top row, right: Model and training info box
+ax_info = fig.add_subplot(gs[0, 2])
+ax_info.axis('off')
+info_text = f"""MODEL CONFIGURATION
+
+Architecture:
+  • Embedding: {'Conv1D' if model.use_conv1d else 'LSTM'}
+  • Context dim: {model.flow.context_dim}
+  • Flow layers: {len(model.flow.layers)}
+  • Hidden dim: 256
+  • Parameters: 3 (frequency, phase, amplitude)
+
+Training:
+  • Samples: {len(pycbc_data)}
+  • Epochs: {len(losses)}
+  • Batch size: 64
+  • Learning rate: 1e-4
+  • Optimizer: Adam
+  • Device: {DEVICE}
+
+Data:
+  • Waveform length: {pycbc_data.shape[1]}
+  • Sine wave parameters:
+    - Frequency: [1, 10] Hz
+    - Phase: [0, 2π] rad
+    - Amplitude: [0.5, 2.0]
+  • Test samples: {len(test_data)}
+"""
+ax_info.text(0.05, 0.95, info_text, fontsize=9, family='monospace',
+             verticalalignment='top', bbox=dict(boxstyle='round', 
+             facecolor='lightblue', alpha=0.3, pad=1))
+
+# Rows 1-3: Posterior histograms for each test sample
+param_names = ['frequency', 'phase', 'amplitude']
+param_units = ['Hz', 'rad', '']
+
+for sample_idx in range(num_test_samples):
+    posterior_samples = all_posteriors[sample_idx]
+    true_params = all_true_params[sample_idx]
+    
+    for param_idx in range(3):
+        ax = fig.add_subplot(gs[sample_idx + 1, param_idx])
+        param_samples = posterior_samples[:, param_idx]
+        true_val = true_params[param_idx]
         
-        mean_errors[param_names[param_idx]].append(abs_error)
-        mean_differences[param_names[param_idx]].append(error)
+        # Plot histogram
+        ax.hist(param_samples, bins=40, alpha=0.7, color='steelblue', edgecolor='black', density=True)
+        
+        # Mark true value
+        ax.axvline(true_val, color='red', linestyle='--', linewidth=2, label=f'True: {true_val:.2f}')
+        
+        # Mark mean
+        mean_val = np.mean(param_samples)
+        ax.axvline(mean_val, color='green', linestyle='-', linewidth=2, label=f'Mean: {mean_val:.2f}')
+        
+        # Add 90% credible interval
+        q05, q95 = np.percentile(param_samples, [5, 95])
+        ax.axvspan(q05, q95, alpha=0.2, color='gray', label='90% CI')
+        
+        unit_str = f' ({param_units[param_idx]})' if param_units[param_idx] else ''
+        ax.set_xlabel(f'{param_names[param_idx]}{unit_str}', fontsize=10)
+        ax.set_ylabel('Density', fontsize=10)
+        ax.set_title(f'Sample {sample_idx+1}: {param_names[param_idx]} (True: {true_val:.2f})', 
+                     fontsize=11, fontweight='bold')
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(True, alpha=0.3)
 
-print(f"\n✓ Completed inference on {num_test_samples} samples")
-
-# Print summary statistics
-print("\nParameter Inference Summary (1000 samples):")
-for param_idx, param in enumerate(param_names):
-    errors = mean_errors[param]
-    diffs = mean_differences[param]
-    print(f"\n{param}:")
-    print(f"  Mean absolute error: {np.mean(errors):.4f}")
-    print(f"  Std dev of errors:   {np.std(errors):.4f}")
-    print(f"  Min error:           {np.min(errors):.4f}")
-    print(f"  Max error:           {np.max(errors):.4f}")
-    print(f"  Median error:        {np.median(errors):.4f}")
-
-# Create visualization with 3 histograms of mean differences
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-# Prepare model information text box
-total_params = sum(p.numel() for p in model.parameters())
-model_info_text = (
-    f"Model Architecture:\n"
-    f"  Embedding: {model.embedding_type.upper()}\n"
-    f"  Flow Layers: {len(model.flow.layers)}\n"
-    f"  Context Dim: {model.flow.context_dim}\n"
-    f"  Hidden Dim: {model.flow.layers[0].hidden_dim}\n"
-    f"  Total Parameters: {total_params:,}"
-)
-
-# Add text box to the first subplot
-axes[0].text(0.02, 0.98, model_info_text, transform=axes[0].transAxes,
-             fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-
-for param_idx, param in enumerate(param_names):
-    ax = axes[param_idx]
-    diffs = mean_differences[param]
-    errors = mean_errors[param]
-    
-    # Plot histogram of differences
-    ax.hist(diffs, bins=50, alpha=0.7, color='steelblue', edgecolor='black', density=False)
-    
-    # Mark zero line (perfect inference)
-    ax.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect Inference (0)')
-    
-    # Mark mean error
-    mean_diff = np.mean(diffs)
-    ax.axvline(mean_diff, color='green', linestyle='-', linewidth=2, label=f'Mean: {mean_diff:.4f}')
-    
-    # Labels and title
-    ax.set_xlabel(f'Mean Difference (Inferred - True)', fontsize=11)
-    ax.set_ylabel('Frequency', fontsize=11)
-    param_label = f'{param} (M$_\odot$)' if param_idx < 2 else f'{param}'
-    ax.set_title(f'{param_label} Inference Errors\n(1000 test samples)', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=10, loc='upper right')
-    ax.grid(True, alpha=0.3)
-
-# Create Plots directory if it doesn't exist
-import os
-from datetime import datetime
-os.makedirs("Plots", exist_ok=True)
-
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-plot_filename = f"Plots/PyCBC_Parameter_Inference_Single_Test_{timestamp}.png"
-
-try:
-    plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
-    print(f"\n✓ Plot saved to: {plot_filename}")
-except Exception as e:
-    print(f"\n✗ Failed to save plot: {e}")
-    import traceback
-    traceback.print_exc()
+plt.savefig("Plots/SineWave_Parameter_Inference_Test.png", dpi=150, bbox_inches='tight')
+print(f"✓ Plot saved to: Plots/SineWave_Parameter_Inference_Test.png")
 print("=" * 80)
-
+'''
