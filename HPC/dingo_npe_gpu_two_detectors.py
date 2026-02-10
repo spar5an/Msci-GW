@@ -454,11 +454,13 @@ class DINGOModel(nn.Module):
     - GPU support for accelerated training
     """
     def __init__(self, data_dim=100, param_dim=1, context_dim=64, 
-                 num_flow_layers=6, hidden_dim=128, device=None, embedding_type='simple'):
+                 num_flow_layers=6, hidden_dim=128, device=None, embedding_type='simple', 
+                 time_delay_value=0.0):
         super().__init__()
         
         # Store embedding type as attribute
         self.embedding_type = embedding_type
+        self.time_delay_value = time_delay_value
         
         # Choose embedding architecture based on embedding_type
         if embedding_type == 'lstm':
@@ -492,9 +494,12 @@ class DINGOModel(nn.Module):
         else:
             raise ValueError(f"Unknown embedding_type: {embedding_type}. Must be 'simple', 'conv1d', or 'lstm'.")
         
+        # Adjust context dimension for flow to account for appended time delay
+        flow_context_dim = context_dim + 1  # +1 for time delay
+        
         self.flow = NormalizingFlow(
             param_dim=param_dim,
-            context_dim=context_dim,
+            context_dim=flow_context_dim,
             num_layers=num_flow_layers,
             hidden_dim=hidden_dim
         )
@@ -511,6 +516,13 @@ class DINGOModel(nn.Module):
             log_prob: log p(params | data)
         """
         context = self.embedding_net(data)
+        
+        # Append time delay as an additional context feature
+        batch_size = context.shape[0]
+        time_delay_tensor = torch.full((batch_size, 1), self.time_delay_value, 
+                                       dtype=context.dtype, device=context.device)
+        context = torch.cat([context, time_delay_tensor], dim=1)
+        
         log_prob = self.flow(params, context)
         return log_prob
     
@@ -528,6 +540,12 @@ class DINGOModel(nn.Module):
         self.eval()
         with torch.no_grad():
             context = self.embedding_net(data)
+            
+            # Append time delay as an additional context feature
+            batch_size = context.shape[0]
+            time_delay_tensor = torch.full((batch_size, 1), self.time_delay_value, 
+                                           dtype=context.dtype, device=context.device)
+            context = torch.cat([context, time_delay_tensor], dim=1)
             samples = self.flow.sample(context, num_samples=num_samples)
         return samples
 
@@ -764,6 +782,29 @@ def denormalize_params(normalized_params, param_norm_info, param_names):
 # ================================================================================
 
 
+def calculate_detector_time_delay(ra: float, dec: float, det1: str = 'H1', det2: str = 'L1') -> float:
+    """
+    Calculate the GPS time delay between two detectors for a gravitational wave arriving from (ra, dec).
+    Uses PyCBC's built-in time_delay_from_earth_center method.
+
+    Returns
+        Time delay in seconds (det2 relative to det1)
+    """
+    try:
+        from pycbc.detector import Detector
+        
+        detector1 = Detector(det1)
+        detector2 = Detector(det2)
+        
+        # PyCBC's built-in method to calculate time delay
+        delay = detector1.time_delay_from_earth_center(detector2, ra, dec)
+        
+        return float(delay)
+    except Exception as e:
+        print(f"Warning: Failed to calculate time delay: {e}. Returning 0.0")
+        return 0.0
+
+
 def prepare_pycbc_data(num_samples=10000):
     config = {
         'mass1': lambda size: np.random.uniform(10, 50, size=size),
@@ -771,8 +812,14 @@ def prepare_pycbc_data(num_samples=10000):
         'spin1z': lambda size: np.random.uniform(-0.5, 0.5, size=size),
         'spin2z': lambda size: np.random.uniform(-0.5, 0.5, size=size),
     }
+    
+    # GPS time delay will be calculated at default sky location (north pole)
+    default_ra = 0.0
+    default_dec = np.pi / 2.0
+    time_delay_default = calculate_detector_time_delay(default_ra, default_dec, 'H1', 'L1')
 
     print(f"\nCalling pycbc_data_generator with {num_samples} samples...")
+    print(f"  GPS time delay (north pole): {time_delay_default*1000:.3f} ms")
     try:
         # Generate with H1 and L1 projection (default detectors)
         result = data_generator.pycbc_data_generator(
@@ -818,6 +865,7 @@ def prepare_pycbc_data(num_samples=10000):
         h1_data = train_data[:, 0, :].reshape(train_data.shape[0], -1)
         l1_data = train_data[:, 1, :].reshape(train_data.shape[0], -1)
         concatenated_data = torch.cat([h1_data, l1_data], dim=1)  # (batch, 2*time_steps)
+        
         data.append(concatenated_data)
         params.append(train_params)
     all_data = torch.cat(data, dim=0)
@@ -837,14 +885,16 @@ def prepare_pycbc_data(num_samples=10000):
         h1_data = test_data[:, 0, :].reshape(test_data.shape[0], -1)
         l1_data = test_data[:, 1, :].reshape(test_data.shape[0], -1)
         concatenated_data = torch.cat([h1_data, l1_data], dim=1)  # (batch, 2*time_steps)
+        
         data_test.append(concatenated_data)
         params_test.append(test_params)
     all_test_data = torch.cat(data_test, dim=0)
     all_test_params = torch.cat(params_test, dim=0)
     print(f"  Test data: {all_test_data.shape}, params: {all_test_params.shape}")
-    print("✓ Data preparation complete (two-detector concatenation applied)\n")
-
-    return all_data, all_params, all_test_data, all_test_params, param_norm_info
+    print("✓ Data preparation complete (two-detector concatenation)\n")
+    
+    # Store time_delay_default for later use during embedding
+    return all_data, all_params, all_test_data, all_test_params, param_norm_info, time_delay_default
 
 
 
@@ -852,14 +902,14 @@ def prepare_pycbc_data(num_samples=10000):
 DENORMALIZE_PARAMETERS = True
 
 # Configure training data size
-NUM_TRAINING_SAMPLES = 1000000  # Adjust this to control dataset size
+NUM_TRAINING_SAMPLES = 50000  # Adjust this to control dataset size
 
 # Model architecture parameters
 PARAM_DIM = 4               
 CONTEXT_DIM = 512           
 NUM_FLOW_LAYERS = 5         
 HIDDEN_DIM = 128            
-EMBEDDING_TYPE = 'conv1d'  # 'simple', 'conv1d', or 'lstm'
+EMBEDDING_TYPE = 'simple'  # 'simple', 'conv1d', or 'lstm'
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Training parameters
@@ -898,13 +948,14 @@ print(f"  Total Batch Updates:                    {total_batches}")
 print(f"  Physics Parameters:                     mass1, mass2, spin1z")
 print("="*70 + "\n")
 
-pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params, param_norm_info = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
+pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params, param_norm_info, GPS_TIME_DELAY = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
 
 # Parameters are already normalized by the data generator (z-score normalization)
 print(f"Using normalized parameters from data generator")
 print(f"  Training samples: {len(pycbc_params)}")
 print(f"  Test samples: {len(pycbc_test_params)}")
 print(f"  Data dimension: {pycbc_data.shape[1]} (2 detectors concatenated)")
+print(f"  GPS time delay: {GPS_TIME_DELAY*1000:.3f} ms (will be appended after embedding)")
 print(f"  Normalization info stored for denormalization\n")     
 
 # Train DINGO model on PyCBC data
@@ -915,7 +966,8 @@ model = DINGOModel(
     num_flow_layers=NUM_FLOW_LAYERS,
     hidden_dim=HIDDEN_DIM,
     device=DEVICE,
-    embedding_type=EMBEDDING_TYPE
+    embedding_type=EMBEDDING_TYPE,
+    time_delay_value=GPS_TIME_DELAY
 )
 
 losses = train_dingo_model_pycbc(

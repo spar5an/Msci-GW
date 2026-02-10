@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N test_pycbc
-#PBS -l walltime=24:00:00
+#PBS -l walltime=02:00:00
 #PBS -l select=1:ncpus=4:mem=8gb:ngpus=1
 #PBS -o HPCOutputLogs/
 #PBS -e HPCOutputLogs/
