@@ -736,7 +736,7 @@ def train_dingo_model_pycbc(model, train_params, train_data,
     print("\n LSTM-based training complete!")
     return losses
 
-def infer_with_dingo(model, observed_data, num_samples=5000):
+def infer_with_dingo(model, observed_data, num_samples=5000, param_norm_info=None, param_names=None):
     """
     Perform inference using the DINGO-style model
     
@@ -744,9 +744,11 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
         model: trained DINGO model
         observed_data: observed sine wave [data_dim]
         num_samples: number of posterior samples
+        param_norm_info: dict with normalization info for each parameter
+        param_names: list of parameter names (e.g., ['mass1', 'mass2', 'spin1z'])
     
     Returns:
-        samples: posterior samples [num_samples, param_dim] in physical parameter space
+        samples: posterior samples [num_samples, param_dim] in physical parameter space (denormalized)
         statistics: dict with mean, median, std, quantiles
     """
     model.eval()
@@ -768,8 +770,17 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
         samples = model.sample_posterior(data_tensor, num_samples=num_samples)
         samples = samples.cpu().numpy()  # [num_samples, param_dim]
     
-    # Samples are in normalized space (z-score) - keep them as-is
-    # No denormalization needed since we're comparing against normalized true values
+    # DENORMALIZATION FIX (2026-02-06): Convert from normalized to physical space
+    # To revert: set DENORMALIZE_PARAMETERS = False in main config section
+    if param_norm_info is not None and param_names is not None and DENORMALIZE_PARAMETERS:
+        # Convert from normalized space to physical space
+        for j, param_name in enumerate(param_names):
+            if param_name in param_norm_info:
+                info = param_norm_info[param_name]
+                original_mean = info['mean']
+                original_std = info['std']
+                # Denormalize: physical_value = normalized_value * std + mean
+                samples[:, j] = samples[:, j] * original_std + original_mean
     
     # For 1D parameters, flatten; for multi-D, keep as is
     if samples.shape[1] == 1:
@@ -788,6 +799,39 @@ def infer_with_dingo(model, observed_data, num_samples=5000):
         statistics = None
     
     return samples, statistics
+
+
+def denormalize_params(normalized_params, param_norm_info, param_names):
+    """
+    Convert normalized parameters back to physical space
+    
+    ADDED (2026-02-06): Revert by not calling this function when DENORMALIZE_PARAMETERS=False
+    
+    Args:
+        normalized_params: array or tensor of normalized parameters [shape: (..., param_dim)]
+        param_norm_info: dict with normalization info for each parameter
+        param_names: list of parameter names
+    
+    Returns:
+        physical_params: denormalized parameters
+    """
+    if isinstance(normalized_params, torch.Tensor):
+        physical_params = normalized_params.clone()
+    else:
+        physical_params = np.array(normalized_params, copy=True)
+    
+    for j, param_name in enumerate(param_names):
+        if param_name in param_norm_info:
+            info = param_norm_info[param_name]
+            original_mean = info['mean']
+            original_std = info['std']
+            # Denormalize: physical_value = normalized_value * std + mean
+            if isinstance(physical_params, torch.Tensor):
+                physical_params[..., j] = physical_params[..., j] * original_std + original_mean
+            else:
+                physical_params[..., j] = physical_params[..., j] * original_std + original_mean
+    
+    return physical_params
 
 
 # ================================================================================
@@ -841,15 +885,18 @@ def prepare_pycbc_data(num_samples=10000):
         traceback.print_exc()
         raise
 
-    # Access the loaders
-    print("Accessing dataloaders from result...")
+    # Access the loaders and metadata
+    print("Accessing dataloaders and metadata from result...")
     try:
         train_loader = result['train_loader']
         val_loader = result['val_loader']
         test_loader = result['test_loader']
+        metadata = result['metadata']
+        param_norm_info = metadata['parameter_normalization']
         print(f"✓ Got dataloaders: train={len(train_loader)} batches, val={len(val_loader)} batches, test={len(test_loader)} batches")
+        print(f"✓ Parameter normalization info stored")
     except Exception as e:
-        print(f"❌ Error accessing dataloaders: {e}")
+        print(f"❌ Error accessing dataloaders/metadata: {e}")
         print(f"Result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
         raise
 
@@ -886,21 +933,37 @@ def prepare_pycbc_data(num_samples=10000):
     print(f"  Test data: {all_test_data.shape}, params: {all_test_params.shape}")
     print("✓ Data preparation complete\n")
 
-    return all_data, all_params, all_test_data, all_test_params
+    return all_data, all_params, all_test_data, all_test_params, param_norm_info
 
 
 
 #Configure EVERYTHING -------------------------------------------------------------------------------------------------------------------------------------------
 
+# DENORMALIZATION CONTROL: Set to False to revert to normalized space (like original code)
+# ✓ Set DENORMALIZE_PARAMETERS = True  → Output in PHYSICAL parameter space (masses in M☉, etc)
+# ✗ Set DENORMALIZE_PARAMETERS = False → Output in NORMALIZED space (z-score, original behavior)
+# 
+# Changes made (2026-02-06):
+#  - Modified prepare_pycbc_data() to return param_norm_info
+#  - Modified infer_with_dingo() to accept param_norm_info and param_names
+#  - Added denormalize_params() helper function
+#  - Updated test loops to conditionally denormalize
+#  - Updated visualization to conditionally denormalize
+#
+# To revert all changes: Set DENORMALIZE_PARAMETERS = False
+# This will revert to the original behavior with all output in normalized space.
+DENORMALIZE_PARAMETERS = True
+
 # Configure training data size
 NUM_TRAINING_SAMPLES = 10000  # Adjust this to control dataset size
 
-pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
+pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params, param_norm_info = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
 
 # Parameters are already normalized by the data generator (z-score normalization)
 print(f"Using normalized parameters from data generator")
 print(f"  Training samples: {len(pycbc_params)}")
-print(f"  Test samples: {len(pycbc_test_params)}\n")
+print(f"  Test samples: {len(pycbc_test_params)}")
+print(f"  Normalization info stored for denormalization\n")
 
 
 # Model architecture parameters
@@ -908,7 +971,7 @@ PARAM_DIM = 3
 CONTEXT_DIM = 512           
 NUM_FLOW_LAYERS = 4         
 HIDDEN_DIM = 128            
-EMBEDDING_TYPE = 'lstm'   
+EMBEDDING_TYPE = 'conv1d'   
 
 # Training parameters
 NUM_EPOCHS = 30             
@@ -965,17 +1028,30 @@ mean_errors = {param: [] for param in param_names}
 mean_differences = {param: [] for param in param_names}
 
 print(f"\nInferring posteriors for {num_test_samples} test samples...")
+if DENORMALIZE_PARAMETERS:
+    print(f"Denormalizing to physical parameter space...")
+else:
+    print(f"Computing errors in NORMALIZED space (original behavior)...")
+    
 for i, test_idx in enumerate(test_indices):
     if i % 100 == 0:
         print(f"  Processing sample {i+1}/{num_test_samples}")
     
     observed_data = pycbc_test_data[test_idx].numpy()
-    true_params = pycbc_test_params[test_idx].numpy()
+    true_params_normalized = pycbc_test_params[test_idx].numpy()
     
-    # Generate posterior samples (in normalized space)
-    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000)
+    # DENORMALIZATION FIX: Denormalize true parameters if enabled
+    if DENORMALIZE_PARAMETERS:
+        true_params = denormalize_params(true_params_normalized, param_norm_info, param_names)
+    else:
+        true_params = true_params_normalized
     
-    # Calculate mean differences (in normalized space)
+    # Generate posterior samples (DENORMALIZED if DENORMALIZE_PARAMETERS=True)
+    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000, 
+                                               param_norm_info=param_norm_info if DENORMALIZE_PARAMETERS else None,
+                                               param_names=param_names if DENORMALIZE_PARAMETERS else None)
+    
+    # Calculate mean differences (in PHYSICAL space if denormalized, or NORMALIZED space if not)
     for param_idx in range(3):
         param_samples = posterior_samples[:, param_idx]
         true_val = true_params[param_idx]
@@ -989,7 +1065,11 @@ for i, test_idx in enumerate(test_indices):
 print(f"\n✓ Completed inference on {num_test_samples} samples")
 
 # Print summary statistics
-print("\nParameter Inference Summary (1000 samples):")
+if DENORMALIZE_PARAMETERS:
+    print("\nParameter Inference Summary (1000 samples in PHYSICAL SPACE):")
+else:
+    print("\nParameter Inference Summary (1000 samples in NORMALIZED SPACE):")
+    
 for param_idx, param in enumerate(param_names):
     errors = mean_errors[param]
     diffs = mean_differences[param]
@@ -1000,8 +1080,24 @@ for param_idx, param in enumerate(param_names):
     print(f"  Max error:           {np.max(errors):.4f}")
     print(f"  Median error:        {np.median(errors):.4f}")
 
-# Create visualization with 3 histograms of mean differences
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+# Store posterior samples for selected samples to display in additional rows
+sample_indices = [0, 250]  # Select samples to display
+sample_posteriors = {}
+if DENORMALIZE_PARAMETERS:
+    print(f"\nGenerating posterior samples for visualization (samples {sample_indices}, DENORMALIZED)...")
+else:
+    print(f"\nGenerating posterior samples for visualization (samples {sample_indices}, NORMALIZED SPACE)...")
+    
+for sample_idx in sample_indices:
+    observed_data = pycbc_test_data[sample_idx].numpy()
+    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000,
+                                               param_norm_info=param_norm_info if DENORMALIZE_PARAMETERS else None,
+                                               param_names=param_names if DENORMALIZE_PARAMETERS else None)
+    sample_posteriors[sample_idx] = posterior_samples
+    print(f"  ✓ Generated posteriors for sample {sample_idx}")
+
+# Create visualization with 3 rows x 3 columns (summary + 2 sample posteriors)
+fig, axes = plt.subplots(3, 3, figsize=(16, 14))
 
 # Prepare model information text box
 total_params = sum(p.numel() for p in model.parameters())
@@ -1015,12 +1111,13 @@ model_info_text = (
 )
 
 # Add text box to the first subplot
-axes[0].text(0.02, 0.98, model_info_text, transform=axes[0].transAxes,
+axes[0, 0].text(0.02, 0.98, model_info_text, transform=axes[0, 0].transAxes,
              fontsize=9, verticalalignment='top',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
+# Row 0: Summary statistics from all 1000 samples
 for param_idx, param in enumerate(param_names):
-    ax = axes[param_idx]
+    ax = axes[0, param_idx]
     diffs = mean_differences[param]
     errors = mean_errors[param]
     
@@ -1041,6 +1138,43 @@ for param_idx, param in enumerate(param_names):
     ax.set_title(f'{param_label} Inference Errors\n(1000 test samples)', fontsize=12, fontweight='bold')
     ax.legend(fontsize=10, loc='upper right')
     ax.grid(True, alpha=0.3)
+
+# Rows 1 & 2: Posterior samples from selected test samples
+for row_idx, sample_idx in enumerate(sample_indices):
+    posterior_samples = sample_posteriors[sample_idx]
+    true_params_normalized = pycbc_test_params[sample_idx].numpy()
+    
+    # DENORMALIZATION FIX: Denormalize true parameters if enabled for display
+    if DENORMALIZE_PARAMETERS:
+        true_params = denormalize_params(true_params_normalized, param_norm_info, param_names)
+    else:
+        true_params = true_params_normalized
+    
+    for param_idx in range(3):
+        ax = axes[row_idx + 1, param_idx]
+        param_samples = posterior_samples[:, param_idx]  # Already denormalized if DENORMALIZE_PARAMETERS=True
+        true_val = true_params[param_idx]
+        
+        # Plot histogram of posterior samples
+        ax.hist(param_samples, bins=50, alpha=0.7, color='darkgreen', edgecolor='black', density=True)
+        
+        # Mark true value
+        ax.axvline(true_val, color='red', linestyle='--', linewidth=2, label=f'True: {true_val:.4f}')
+        
+        # Mark mean of posterior
+        posterior_mean = np.mean(param_samples)
+        ax.axvline(posterior_mean, color='orange', linestyle='-', linewidth=2, label=f'Inferred: {posterior_mean:.4f}')
+        
+        # Labels and title
+        param_label = f'{param_names[param_idx]} (M$_\odot$)' if param_idx < 2 else f'{param_names[param_idx]}'
+        if DENORMALIZE_PARAMETERS:
+            ax.set_xlabel(f'{param_label} Value (physical space)', fontsize=11)
+        else:
+            ax.set_xlabel(f'{param_label} Value (normalized space)', fontsize=11)
+        ax.set_ylabel('Density', fontsize=11)
+        ax.set_title(f'{param_label} Posterior (Sample {sample_idx})', fontsize=12, fontweight='bold')
+        ax.legend(fontsize=10, loc='upper right')
+        ax.grid(True, alpha=0.3)
 
 # Create Plots directory if it doesn't exist
 import os

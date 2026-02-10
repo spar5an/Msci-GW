@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N test_pycbc
-#PBS -l walltime=04:00:00
+#PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=4:mem=8gb:ngpus=1
 #PBS -o HPCOutputLogs/
 #PBS -e HPCOutputLogs/
@@ -87,9 +87,15 @@ TRAIN_MONITOR_PID=$!
 echo "Training monitor started with PID: $TRAIN_MONITOR_PID"
 
 #=======================================================================================
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
 
-echo "=== Run dingo_npe_gpu.py ==="
-python dingo_npe_gpu.py 2>&1 | tee HPCOutputLogs/python_output.log
+echo "=== Run dingo_npe_gpu_two_detectors.py ==="
+echo "(Configuration will be output by the Python script)"
+python dingo_npe_gpu_two_detectors.py 2>&1 | tee HPCOutputLogs/python_output.log
 TRAIN_EXIT_CODE=$?
 
 # Kill monitoring processes

@@ -1,3 +1,40 @@
+=== DEBUG INFO ===
+hostname: cx3-20-2
+pwd: /rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC
+which python: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+Python 3.11.3
+=== Try importing pycbc in PBS job ===
+pycbc OK in PBS
+pycbc file: /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
+python exe: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
+Host: cx3-20-2
+GPUs visible to CUDA:
+Tue Feb 10 16:42:51 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.82.07              Driver Version: 580.82.07      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    On  |   00000000:B3:00.0 Off |                    0 |
+| N/A   34C    P8             34W /  350W |       0MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+=== Starting GPU Monitor (logging to gpu_monitor.log and gpu_data.csv) ===
+GPU monitor started with PID: 699046
+=== Starting Training Monitor (logging to training_progress.log) ===
+Training monitor started with PID: 699047
+=== Run dingo_npe_gpu_two_detectors.py ===
+(Configuration will be output by the Python script)
 Libraries imported successfully
 PyTorch version: 2.9.1+cu128
 Device: cuda
@@ -155,35 +192,16 @@ Chunk 29/200 (5000 waveforms)...
   Chunk: 5000 successful
 
 Chunk 30/200 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<40:53,  2.04it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:38, 126.15it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:28, 169.70it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:24, 189.60it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 200.83it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 209.30it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 213.97it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 215.75it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:04<00:19, 216.52it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 218.96it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:18, 219.99it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 219.05it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:17, 219.68it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 221.41it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:16, 219.25it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 220.31it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:15, 217.60it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:08<00:15, 218.29it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 217.94it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:09<00:14, 219.57it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 218.76it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:10<00:13, 219.04it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 221.72it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:12, 219.42it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:11<00:11, 217.71it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:11, 220.65it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:12<00:10, 218.14it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 215.79it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:13<00:10, 203.42it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 216.65it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:14<00:09, 217.09it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:09, 199.94it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:15<00:10, 177.87it/s]hon/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/pool.py", line 131, in worker
-    put((job, i, result))
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/queues.py", line 377, in put
-    self._writer.send_bytes(obj)
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/connection.py", line 199, in send_bytes
-    self._send_bytes(m[offset:offset + size])
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/connection.py", line 403, in _send_bytes
-    self._send(header)
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/connection.py", line 367, in _send
-    n = write(self._handle, buf)
-        ^^^^^^^^^^^^^^^^^^^^^^^^
-BrokenPipeError: [Errno 32] Broken pipe
+Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<40:53,  2.04it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:38, 126.15it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:28, 169.70it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:24, 189.60it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 200.83it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 209.30it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 213.97it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 215.75it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:04<00:19, 216.52it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 218.96it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:18, 219.99it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 219.05it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:17, 219.68it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 221.41it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:16, 219.25it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 220.31it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:15, 217.60it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:08<00:15, 218.29it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 217.94it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:09<00:14, 219.57it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 218.76it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:10<00:13, 219.04it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 221.72it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:12, 219.42it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:11<00:11, 217.71it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:11, 220.65it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:12<00:10, 218.14it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 215.79it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:13<00:10, 203.42it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 216.65it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:14<00:09, 217.09it/s]=== Stopping Monitors ===
+=== Generating GPU Usage Plot ===
+⚠ No valid GPU data found in CSV file
+=== Done ===
 
-During handling of the above exception, another exception occurred:
+====================================
+CPU Time used: 00:09:58
+CPU Percent: 103%
+Memory usage: 7249976kb
+Approx Power usage: 0.0017999999999999997
+Walltime usage: 00:12:11
 
-Traceback (most recent call last):
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
-    self.run()
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/process.py", line 108, in run
-    self._target(*self._args, **self._kwargs)
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/pool.py", line 136, in worker
-    put((job, i, (False, wrapped)))
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/queues.py", line 377, in put
-    self._writer.send_bytes(obj)
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/connection.py", line 199, in send_bytes
-    self._send_bytes(m[offset:offset + size])
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/connection.py", line 403, in _send_bytes
-    self._send(header)
-  File "/sw-eb/software/Python/3.11.3-GCCcore-12.3.0/lib/python3.11/multiprocessing/connection.py", line 367, in _send
-    n = write(self._handle, buf)
-        ^^^^^^^^^^^^^^^^^^^^^^^^
-BrokenPipeError: [Errno 32] Broken pipe
+====================================
