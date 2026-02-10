@@ -1,0 +1,197 @@
+[
+  {
+    "event_name": "GW150914",
+    "params": {
+      "mass1": 35.6,
+      "mass2": 30.6,
+      "spin1z": 0.0,
+      "spin2z": 0.0,
+      "distance": 440.0,
+      "inclination": 0.0,
+      "ra": 0.0,
+      "dec": 0.0,
+      "polarization": 0.0
+    },
+    "detectors": {
+      "H1": {
+        "correlation": 0.5888327860620864,
+        "time_shift_ms": 123.291015625,
+        "phase_flip": 1.0,
+        "scale_factor": 1.13255400039528,
+        "effective_distance": 200.89177601573502
+      },
+      "L1": {
+        "correlation": 0.502832638945096,
+        "time_shift_ms": 118.65234375,
+        "phase_flip": -1.0,
+        "scale_factor": 1.2567746443469339,
+        "effective_distance": 229.41013823780204
+      }
+    },
+    "optimization": {
+      "best_phase": 4.71238898038469,
+      "best_inclination": 1.0471975511965976,
+      "best_correlation": 0.1025838973754761
+    },
+    "h1_l1_delay_theoretical": 0.0018845389582807003,
+    "h1_l1_delay_empirical": 0.007568359375,
+    "h1_l1_correlation": 0.41879054543131733,
+    "h1_l1_phase_flip": -1.0
+  },
+  {
+    "event_name": "GW151226",
+    "params": {
+      "mass1": 13.7,
+      "mass2": 7.7,
+      "spin1z": 0.0,
+      "spin2z": 0.0,
+      "distance": 450.0,
+      "inclination": 0.0,
+      "ra": 0.0,
+      "dec": 0.0,
+      "polarization": 0.0
+    },
+    "detectors": {
+      "H1": {
+        "correlation": 0.17792022970712587,
+        "time_shift_ms": 83.740234375,
+        "phase_flip": 1.0,
+        "scale_factor": 1.2909024328176977,
+        "effective_distance": 215.968673588276
+      },
+      "L1": {
+        "correlation": 0.21972267114352914,
+        "time_shift_ms": 81.298828125,
+        "phase_flip": 1.0,
+        "scale_factor": 1.3332770893471155,
+        "effective_distance": 146.14154727006368
+      }
+    },
+    "optimization": {
+      "best_phase": 2.748893571891069,
+      "best_inclination": 0.39269908169872414,
+      "best_correlation": 0.13470105787814038
+    },
+    "h1_l1_delay_theoretical": 0.0031204426601552635,
+    "h1_l1_delay_empirical": 0.0009765625,
+    "h1_l1_correlation": 0.14832096221965693,
+    "h1_l1_phase_flip": -1.0
+  },
+  {
+    "event_name": "GW170104",
+    "params": {
+      "mass1": 30.8,
+      "mass2": 20.0,
+      "spin1z": 0.0,
+      "spin2z": 0.0,
+      "distance": 990.0,
+      "inclination": 0.0,
+      "ra": 0.0,
+      "dec": 0.0,
+      "polarization": 0.0
+    },
+    "detectors": {
+      "H1": {
+        "correlation": 0.32154269816547304,
+        "time_shift_ms": 73.974609375,
+        "phase_flip": 1.0,
+        "scale_factor": 1.3138723826897285,
+        "effective_distance": 335.32665012335474
+      },
+      "L1": {
+        "correlation": 0.29240359524156617,
+        "time_shift_ms": 74.21875,
+        "phase_flip": -1.0,
+        "scale_factor": 1.2047277964439527,
+        "effective_distance": 521.7961058828739
+      }
+    },
+    "optimization": {
+      "best_phase": 4.71238898038469,
+      "best_inclination": 0.7853981633974483,
+      "best_correlation": 0.1375610406799483
+    },
+    "h1_l1_delay_theoretical": 0.006945858425958042,
+    "h1_l1_delay_empirical": -0.003173828125,
+    "h1_l1_correlation": 0.1920743145127996,
+    "h1_l1_phase_flip": -1.0
+  },
+  {
+    "event_name": "GW170608",
+    "params": {
+      "mass1": 11.0,
+      "mass2": 7.6,
+      "spin1z": 0.0,
+      "spin2z": 0.0,
+      "distance": 320.0,
+      "inclination": 0.0,
+      "ra": 0.0,
+      "dec": 0.0,
+      "polarization": 0.0
+    },
+    "detectors": {
+      "H1": {
+        "correlation": 0.30459061992454933,
+        "time_shift_ms": 13.18359375,
+        "phase_flip": -1.0,
+        "scale_factor": 1.134095270482068,
+        "effective_distance": 104.60972919398802
+      },
+      "L1": {
+        "correlation": 0.30167023853129155,
+        "time_shift_ms": 28.564453125,
+        "phase_flip": -1.0,
+        "scale_factor": 1.164569168196549,
+        "effective_distance": 156.75603631520042
+      }
+    },
+    "optimization": {
+      "best_phase": 1.1780972450961724,
+      "best_inclination": 1.0471975511965976,
+      "best_correlation": 0.05974193406761586
+    },
+    "h1_l1_delay_theoretical": 0.0032680971539223234,
+    "h1_l1_delay_empirical": -0.010986328125,
+    "h1_l1_correlation": 0.20097270137263443,
+    "h1_l1_phase_flip": 1.0
+  },
+  {
+    "event_name": "GW170814",
+    "params": {
+      "mass1": 30.6,
+      "mass2": 25.2,
+      "spin1z": 0.0,
+      "spin2z": 0.0,
+      "distance": 600.0,
+      "inclination": 0.0,
+      "ra": 0.0,
+      "dec": 0.0,
+      "polarization": 0.0
+    },
+    "detectors": {
+      "H1": {
+        "correlation": 0.3683093901050582,
+        "time_shift_ms": 114.990234375,
+        "phase_flip": -1.0,
+        "scale_factor": 1.7665452513759123,
+        "effective_distance": 600.0
+      },
+      "L1": {
+        "correlation": 0.39875339097943474,
+        "time_shift_ms": 112.060546875,
+        "phase_flip": 1.0,
+        "scale_factor": 1.1540009995681455,
+        "effective_distance": 600.0
+      }
+    },
+    "optimization": {
+      "best_phase": 5.890486225480862,
+      "best_inclination": 0.39269908169872414,
+      "best_correlation": 0.051201029185790725
+    },
+    "h1_l1_delay_theoretical": -0.0012072016547011977,
+    "h1_l1_delay_empirical": 0.008056640625,
+    "h1_l1_correlation": 0.23955785568094265,
+    "h1_l1_phase_flip": -1.0
+  }
+]

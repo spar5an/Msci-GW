@@ -438,6 +438,11 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
             f_lower=f_lower
         )
 
+        # Shift waveform epoch to desired GPS time (affects antenna pattern and time delays)
+        gps_time = params.get('gps_time', 1126259462.4)  # Default: GW150914 merger time
+        hp.start_time += gps_time
+        hc.start_time += gps_time
+
         # Get sky location parameters (defaults to north pole and zero polarization)
         ra = params.get('ra', 0.0)
         dec = params.get('dec', np.pi/2)  # North pole
@@ -567,6 +572,8 @@ def pycbc_data_generator(config: Dict[str, Callable],
         - 'ra': Right ascension (radians) - default: 0.0
         - 'dec': Declination (radians) - default: π/2 (north pole)
         - 'polarization': Polarization angle (radians) - default: 0.0
+        - 'gps_time': GPS time of merger (seconds) - default: 1126259462.4 (GW150914)
+          Affects detector antenna pattern and inter-detector time delays.
         - 'tc': Coalescence time - default: 0.0
         
     num_samples : int
@@ -621,21 +628,24 @@ def pycbc_data_generator(config: Dict[str, Callable],
     if detectors is None:
         detectors = ['H1', 'L1']
     
-    # Check which sky parameters are provided
+    # Check which sky/time parameters are provided
     sky_params_provided = {
         'ra': 'ra' in config,
         'dec': 'dec' in config,
-        'polarization': 'polarization' in config
+        'polarization': 'polarization' in config,
+        'gps_time': 'gps_time' in config
     }
     
     if any(sky_params_provided.values()):
         print(f"Generating {num_samples} waveforms with projection to {detectors}")
         print(f"  Sky parameters: ra={'provided' if sky_params_provided['ra'] else 'default (0.0)'}, "
               f"dec={'provided' if sky_params_provided['dec'] else 'default (π/2)'}, "
-              f"psi={'provided' if sky_params_provided['polarization'] else 'default (0.0)'}")
+              f"psi={'provided' if sky_params_provided['polarization'] else 'default (0.0)'}, "
+              f"gps_time={'provided' if sky_params_provided['gps_time'] else 'default (1126259462.4)'}")
     else:
         print(f"Generating {num_samples} waveforms with projection to {detectors}")
         print(f"  Using default sky location: ra=0.0, dec=π/2 (north pole), psi=0.0")
+        print(f"  Using default GPS time: 1126259462.4 (GW150914)")
     
     # Calculate target length from signal_length parameter
     target_length = int(signal_length / time_resolution)
