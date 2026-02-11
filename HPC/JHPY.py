@@ -25,6 +25,15 @@ from pycbc.psd import welch, interpolate
 from pycbc.filter import highpass_fir, lowpass_fir, resample_to_delta_t
 from torch.utils.data import Subset
 import warnings
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Real Data'))
+try:
+    from catalog_utils import *
+    from real_data_loader import *
+    from event_processor import *
+    from comparison_utils import *
+except ImportError:
+    pass
 
 
 

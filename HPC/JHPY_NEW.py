@@ -613,12 +613,12 @@ def infer_waveform_length(dloader):
     return next(iter(dloader))[0].shape[-1]
 
 
-output = load_dataloaders("data_noise.pt")
-
-train_dloader = output["train_loader"]
-val_dloader = output["val_loader"]
-test_dloader = output["test_loader"]
-metadata = output["metadata"]
+if __name__ == "__main__":
+    output = load_dataloaders("data_noise.pt")
+    train_dloader = output["train_loader"]
+    val_dloader = output["val_loader"]
+    test_dloader = output["test_loader"]
+    metadata = output["metadata"]
 
 
 
@@ -769,104 +769,101 @@ def infer_NPE(model, observed_data, num_samples=5000):  # <- DATA_FLOW [13] OBSE
 
 
 
-# ============================================================================
-# TEST MULTI-DETECTOR NPE WITH PYCBC DATA
-# ============================================================================
+if __name__ == "__main__":
+    # ============================================================================
+    # TEST MULTI-DETECTOR NPE WITH PYCBC DATA
+    # ============================================================================
 
-# ============================================================================
-# TEST MULTI-DETECTOR NPE WITH PYCBC DATA
-# ============================================================================
+    # Create model with multi-detector support
+    model = DINGOModel(
+        data_dim=6751,
+        param_dim=3,
+        context_dim=256,
+        num_flow_layers=6,
+        hidden_dim=128,
+        embedding='conv1d',
+        num_detectors=2
+    )
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
 
-# Create model with multi-detector support
-model = DINGOModel(
-    data_dim=6751,
-    param_dim=3,
-    context_dim=256,
-    num_flow_layers=6,
-    hidden_dim=128,
-    embedding='conv1d',
-    num_detectors=2
-)
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = model.to(device)
+    # Train the model
+    print(f"Training on device: {device}")
+    history = train_npe_pycbc(
+        model,
+        train_dloader,
+        val_dloader=val_dloader,
+        n_epochs=10,
+        lr=1e-4,
+        optimizer='adamw',
+        device=device,
+        model_path='best_multi_detector_npe.pt',
+        verbose=True
+    )
 
-# Train the model
-print(f"Training on device: {device}")
-history = train_npe_pycbc(
-    model,
-    train_dloader,
-    val_dloader=val_dloader,
-    n_epochs=10,
-    lr=1e-4,
-    optimizer='adamw',
-    device=device,
-    model_path='best_multi_detector_npe.pt',
-    verbose=True
-)
+    # Save training history
+    import pickle
+    with open('training_history.pkl', 'wb') as f:
+        pickle.dump(history, f)
+    print(f"Training complete! History saved to training_history.pkl")
 
-# Save training history
-import pickle
-with open('training_history.pkl', 'wb') as f:
-    pickle.dump(history, f)
-print(f"Training complete! History saved to training_history.pkl")
+    # Forward pass test for visualization
+    batch_data, batch_params = next(iter(train_dloader))
+    batch_data = batch_data.to(device)
+    batch_params = batch_params.to(device)
 
-# Forward pass test for visualization
-batch_data, batch_params = next(iter(train_dloader))
-batch_data = batch_data.to(device)
-batch_params = batch_params.to(device)
+    log_prob = model(batch_params, batch_data)
 
-log_prob = model(batch_params, batch_data)
+    # Sample test
+    samples = model.sample_posterior(batch_data[:1], num_samples=100)
 
-# Sample test
-samples = model.sample_posterior(batch_data[:1], num_samples=100)
+    # ============================================================================
+    # PLOT RESULTS
+    # ============================================================================
 
-# ============================================================================
-# PLOT RESULTS
-# ============================================================================
+    fig = plt.figure(figsize=(14, 10))
 
-fig = plt.figure(figsize=(14, 10))
+    # Plot 1: Log probability (mock training curve)
+    ax1 = plt.subplot(2, 3, 1)
+    epochs = range(1, len(history['train_log_probs']) + 1)
+    ax1.plot(epochs, history['train_log_probs'], 'b-o', linewidth=2, label='Training')
+    if history['val_log_probs']:
+        ax1.plot(epochs, history['val_log_probs'], 'r-s', linewidth=2, label='Validation')
+    ax1.set_xlabel('Epoch', fontsize=11)
+    ax1.set_ylabel('Log Probability', fontsize=11)
+    ax1.set_title('NPE Training Progress', fontsize=12, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
 
-# Plot 1: Log probability (mock training curve)
-ax1 = plt.subplot(2, 3, 1)
-epochs = range(1, len(history['train_log_probs']) + 1)
-ax1.plot(epochs, history['train_log_probs'], 'b-o', linewidth=2, label='Training')
-if history['val_log_probs']:
-    ax1.plot(epochs, history['val_log_probs'], 'r-s', linewidth=2, label='Validation')
-ax1.set_xlabel('Epoch', fontsize=11)
-ax1.set_ylabel('Log Probability', fontsize=11)
-ax1.set_title('NPE Training Progress', fontsize=12, fontweight='bold')
-ax1.grid(True, alpha=0.3)
-ax1.legend()
+    # Plot 2-4: Posterior sample histograms
+    param_names = ['mass1', 'mass2', 'spin1z']
+    param_labels = ['Mass 1 ($M_\\odot$)', 'Mass 2 ($M_\\odot$)', 'Spin 1z']
 
-# Plot 2-4: Posterior sample histograms
-param_names = ['mass1', 'mass2', 'spin1z']
-param_labels = ['Mass 1 ($M_\\odot$)', 'Mass 2 ($M_\\odot$)', 'Spin 1z']
+    for i, (param_name, param_label) in enumerate(zip(param_names, param_labels), 2):
+        ax = plt.subplot(2, 3, i)
+        samples_1d = samples[:, i-2].cpu().numpy() if torch.is_tensor(samples) else samples[:, i-2]
 
-for i, (param_name, param_label) in enumerate(zip(param_names, param_labels), 2):
-    ax = plt.subplot(2, 3, i)
-    samples_1d = samples[:, i-2].cpu().numpy() if torch.is_tensor(samples) else samples[:, i-2]
-    
-    # Create histogram
-    counts, bins, patches = ax.hist(samples_1d, bins=30, density=True, 
-                                     alpha=0.7, color='steelblue', edgecolor='black')
-    
-    # Add statistics
-    mean_val = samples_1d.mean()
-    std_val = samples_1d.std()
-    ax.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_val:.3f}')
-    ax.axvline(mean_val - std_val, color='orange', linestyle=':', linewidth=1.5, label=f'±1σ')
-    ax.axvline(mean_val + std_val, color='orange', linestyle=':', linewidth=1.5)
-    
-    ax.set_xlabel(param_label, fontsize=11)
-    ax.set_ylabel('Probability Density', fontsize=11)
-    ax.set_title(f'Posterior: {param_label}', fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.legend(fontsize=9)
+        # Create histogram
+        counts, bins, patches = ax.hist(samples_1d, bins=30, density=True,
+                                         alpha=0.7, color='steelblue', edgecolor='black')
 
-# Plot 5: Data shape info
-ax5 = plt.subplot(2, 3, 5)
-ax5.axis('off')
-info_text = f"""
+        # Add statistics
+        mean_val = samples_1d.mean()
+        std_val = samples_1d.std()
+        ax.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_val:.3f}')
+        ax.axvline(mean_val - std_val, color='orange', linestyle=':', linewidth=1.5, label=f'±1σ')
+        ax.axvline(mean_val + std_val, color='orange', linestyle=':', linewidth=1.5)
+
+        ax.set_xlabel(param_label, fontsize=11)
+        ax.set_ylabel('Probability Density', fontsize=11)
+        ax.set_title(f'Posterior: {param_label}', fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.legend(fontsize=9)
+
+    # Plot 5: Data shape info
+    ax5 = plt.subplot(2, 3, 5)
+    ax5.axis('off')
+    info_text = f"""
 Multi-Detector NPE Status
 
 Data Shape: {batch_data.shape}
@@ -884,10 +881,10 @@ Sampling:
 • Posterior samples: {samples.shape[0]}
 • Parameter dimensions: {samples.shape[1]}
 """
-ax5.text(0.1, 0.5, info_text, fontsize=10, family='monospace',
-         verticalalignment='center', bbox=dict(boxstyle='round', 
-         facecolor='lightgreen', alpha=0.3))
+    ax5.text(0.1, 0.5, info_text, fontsize=10, family='monospace',
+             verticalalignment='center', bbox=dict(boxstyle='round',
+             facecolor='lightgreen', alpha=0.3))
 
-plt.tight_layout()
-plt.savefig('multi_detector_npe_results.png', dpi=150, bbox_inches='tight')
-plt.close()
+    plt.tight_layout()
+    plt.savefig('multi_detector_npe_results.png', dpi=150, bbox_inches='tight')
+    plt.close()

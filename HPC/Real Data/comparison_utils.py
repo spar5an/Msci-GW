@@ -78,6 +78,7 @@ def generate_comparison_waveform(
     ra = params.get('ra', 0.0) or 0.0
     dec = params.get('dec', 0.0) or 0.0
     polarization = params.get('polarization', 0.0) or 0.0
+    gps_time = params.get('tc', 1126259462.0)  # Event coalescence GPS time
 
     # Generate waveform
     hp, hc = get_td_waveform(
@@ -93,22 +94,21 @@ def generate_comparison_waveform(
         f_lower=f_lower
     )
 
+    # Shift waveform epoch to event GPS time (affects antenna pattern and time delays)
+    hp.start_time += gps_time
+    hc.start_time += gps_time
+
     target_length = int(signal_length / time_resolution)
 
-    # Project to detectors
+    # Project to detectors using project_wave (handles antenna pattern + time delays)
     waveforms = {}
     for det_name in detectors:
         try:
             detector = Detector(det_name)
-
-            # Project waveform to detector
-            # Use a fixed GPS time for projection (doesn't affect comparison)
-            gps_time = 1126259462.0  # GW150914 time
-            fp, fc = detector.antenna_pattern(ra, dec, polarization, gps_time)
-            strain = fp * hp + fc * hc
+            signal = detector.project_wave(hp, hc, ra, dec, polarization, method='lal')
 
             # Crop/pad to target length
-            strain_array = np.array(strain)
+            strain_array = np.array(signal)
 
             if len(strain_array) > target_length:
                 # Keep the end (merger portion)
@@ -136,7 +136,8 @@ def generate_comparison_waveform(
             'coa_phase': coa_phase,
             'ra': ra,
             'dec': dec,
-            'polarization': polarization
+            'polarization': polarization,
+            'gps_time': gps_time
         },
         'metadata': {
             'event_name': event_name,

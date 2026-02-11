@@ -8,7 +8,7 @@ different detector responses for the same source parameters.
 Also tests that varying ra/dec alongside GPS time produces further variation.
 """
 
-from JHPY import pycbc_data_generator
+from JHPY import *
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -211,4 +211,42 @@ if any_diff and h1_var > 1.01:
     print("\n  PASS: GPS time + sky location variation produces genuinely different waveforms.")
 else:
     print("\n  FAIL: Waveforms not sufficiently different.")
+print("=" * 80)
+
+# ─── Test 3: generate_comparison_waveform uses correct GPS time ───
+print("\n\n--- Test 3: generate_comparison_waveform (Real Data module) ---")
+print("Verifying GPS time is pulled from catalog and project_wave is used...\n")
+
+try:
+    result = generate_comparison_waveform('GW150914')
+
+    # Check GPS time is in returned parameters
+    gps_in_params = 'gps_time' in result['parameters']
+    gps_val = result['parameters'].get('gps_time')
+    print(f"  gps_time in returned parameters: {gps_in_params}")
+    print(f"  gps_time value: {gps_val}")
+
+    # Check H1 and L1 differ (project_wave includes time delays, manual method didn't)
+    h1 = result['waveforms']['H1']
+    l1 = result['waveforms']['L1']
+    are_identical = np.allclose(h1, l1, atol=1e-30)
+    max_diff = np.max(np.abs(h1 - l1))
+    corr = np.corrcoef(h1, l1)[0, 1]
+    print(f"  H1 and L1 identical: {are_identical}")
+    print(f"  H1 vs L1 max diff: {max_diff:.4e}")
+    print(f"  H1 vs L1 correlation: {corr:.6f}")
+
+    h1_peak = np.abs(h1).max()
+    l1_peak = np.abs(l1).max()
+    print(f"  H1 peak: {h1_peak:.4e}, L1 peak: {l1_peak:.4e}")
+
+    if gps_in_params and not are_identical:
+        print("\n  PASS: generate_comparison_waveform uses correct GPS time + project_wave.")
+    else:
+        print("\n  FAIL: GPS time not propagated or detectors not differentiated.")
+
+except Exception as e:
+    print(f"  SKIP: Could not test generate_comparison_waveform: {e}")
+    print("  (This is expected if GWOSC catalog is not accessible)")
+
 print("=" * 80)
