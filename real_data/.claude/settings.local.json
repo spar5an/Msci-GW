@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:www.gwosc.org)",
+      "WebFetch(domain:gwosc.org)",
+      "WebFetch(domain:lscsoft.docs.ligo.org)",
+      "Bash(pip show:*)",
+      "Bash(python:*)",
+      "Read(//usr/lib64/python3.6/site-packages/**)",
+      "Read(//usr/**)",
+      "Bash(python3.11:*)",
+      "Bash(yes:*)"
+    ]
+  }
+}
