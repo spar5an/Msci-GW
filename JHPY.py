@@ -904,7 +904,8 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
         z = params.get('redshift', 0.1)
 
         freqs = hp_fd.sample_frequencies.numpy()[1:]
-        phase_shift = _additional_phase(freqs, chirp_mass, z, lambda_g)
+        lg = params.get('lambda_g', lambda_g)  # per-sample overrides function-level
+        phase_shift = _additional_phase(freqs, chirp_mass, z, lg)
 
         hp_array = hp_fd.numpy().copy()
         hc_array = hc_fd.numpy().copy()
@@ -1018,7 +1019,7 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
 
 def pycbc_modified_data_generator(config: Dict[str, Callable],
                                    num_samples: int,
-                                   lambda_g: float,
+                                   lambda_g: float = None,
                                    time_resolution: float = 1/4096,
                                    approximant: str = 'IMRPhenomD',
                                    f_lower: float = 30.0,
@@ -1047,8 +1048,11 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
         plus all standard sky/orientation params.
     num_samples : int
         Total number of waveforms to generate.
-    lambda_g : float
+    lambda_g : float, optional
         Graviton Compton wavelength in metres (dataset-level constant).
+        If None, 'lambda_g' must be provided in config as a per-sample
+        distribution. If both are given, the config (per-sample) takes
+        precedence.
     time_resolution : float
         Time step delta_t. Default: 1/4096
     approximant : str
@@ -1087,7 +1091,10 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
         raise ValueError("train_split and val_split must be between 0 and 1")
     if train_split + val_split >= 1:
         raise ValueError("train_split + val_split must be < 1")
-    if lambda_g <= 0:
+    lambda_g_in_config = 'lambda_g' in config
+    if lambda_g is None and not lambda_g_in_config:
+        raise ValueError("lambda_g must be provided either as an argument or in config")
+    if lambda_g is not None and lambda_g <= 0:
         raise ValueError("lambda_g must be positive")
 
     if num_workers is None:
@@ -1104,7 +1111,10 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
     }
 
     target_length = int(signal_length / time_resolution)
-    print(f"Generating {num_samples} MODIFIED waveforms (lambda_g={lambda_g:.2e} m)")
+    if lambda_g_in_config:
+        print(f"Generating {num_samples} MODIFIED waveforms (lambda_g=per-sample from config)")
+    else:
+        print(f"Generating {num_samples} MODIFIED waveforms (lambda_g={lambda_g:.2e} m)")
     print(f"  Approximant: {approximant} (frequency domain)")
     print(f"  Frequency range: {f_lower}-{f_final} Hz")
     print(f"  Detectors: {detectors}")
@@ -1218,6 +1228,7 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
             'lambda_g': lambda_g,
+            'lambda_g_varied': lambda_g_in_config,
             'modified': True,
             'preprocessing': {}
         }
