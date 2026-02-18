@@ -64,20 +64,30 @@ def test_D_alpha():
 def test_additional_phase():
     print("\n=== Test 2: _additional_phase ===")
 
+    from pycbc.waveform import get_fd_waveform
+
+    # Generate a waveform to get f_c from the non-zero amplitude range
+    hp_fd, _ = get_fd_waveform(
+        approximant='IMRPhenomD', mass1=30.0, mass2=30.0,
+        delta_f=1.0/256, f_lower=30.0, f_final=2048.0, distance=410.0
+    )
+    fd_freqs = hp_fd.sample_frequencies.numpy()[1:]
+    f_c = float(np.max(fd_freqs[np.nonzero(np.abs(hp_fd.numpy()[1:]))]))
+
     freqs = np.array([100.0])
     chirp_mass = (30 * 30)**(3/5) / (30 + 30)**(1/5)
 
-    ps1 = _additional_phase(freqs, chirp_mass, 0.1, 1e16)[0]
-    ps2 = _additional_phase(freqs, chirp_mass, 0.1, 1e15)[0]
+    ps1 = _additional_phase(freqs, chirp_mass, 0.1, 1e16, f_c)[0]
+    ps2 = _additional_phase(freqs, chirp_mass, 0.1, 1e15, f_c)[0]
     ratio = ps2 / ps1
     report("Phase scales as 1/lambda_g^2 (ratio ~ 100)", abs(ratio - 100) < 1,
            f"ratio={ratio:.2f}")
 
-    ps_gr = _additional_phase(freqs, chirp_mass, 0.1, 1e30)[0]
+    ps_gr = _additional_phase(freqs, chirp_mass, 0.1, 1e30, f_c)[0]
     report("GR limit (lambda_g=1e30): phase ~ 0", abs(ps_gr) < 1e-20,
            f"got {ps_gr:.6e}")
 
-    ps_small = _additional_phase(freqs, chirp_mass, 0.1, 1e13)[0]
+    ps_small = _additional_phase(freqs, chirp_mass, 0.1, 1e13, f_c)[0]
     report("Small lambda_g gives large phase shift", abs(ps_small) > abs(ps1),
            f"|{ps_small:.4e}| > |{ps1:.4e}|")
 
@@ -346,8 +356,8 @@ def plot_lambda_g_scan(gr_result, scan_results):
         axes[idx].plot(time[t_start:t_end], gr_sig[t_start:t_end],
                        label="GR", color='black', linewidth=1.5)
 
-        colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(scan_results)))
-        for (lg, r), c in zip(sorted(scan_results.items()), colors):
+        scan_colors = ['tab:red', 'tab:blue', 'tab:orange', 'tab:green', 'tab:purple']
+        for (lg, r), c in zip(sorted(scan_results.items()), scan_colors):
             sig = np.array(r['detectors'][det])
             axes[idx].plot(time[t_start:t_end], sig[t_start:t_end],
                           label=f"$\\lambda_g = 10^{{{int(np.log10(lg))}}}$ m",

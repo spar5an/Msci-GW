@@ -70,13 +70,15 @@ def _D_alpha(alpha, z):
     return _C * (1 + z) / _H0 * integrand_result[0]
 
 
-def _additional_phase(freqs, chirp_mass, z, lambda_g):
+def _additional_phase(freqs, chirp_mass, z, lambda_g, f_c):
     """
     Compute massive graviton phase shift for a frequency array.
 
-    Implements delta_Psi = -beta * u^{-1} where beta encodes the graviton
-    Compton wavelength and cosmological distance. PN correction terms are
-    NOT included -- they are already in IMRPhenomD/IMRPhenomXP.
+    Implements delta_Psi = -beta * u^{-1} + constant_terms where beta
+    encodes the graviton Compton wavelength and cosmological distance.
+    The constant terms ensure the phase shift vanishes at the cutoff
+    frequency f_c. PN correction terms are NOT included -- they are
+    already in IMRPhenomD/IMRPhenomXP.
 
     Parameters
     ----------
@@ -88,6 +90,8 @@ def _additional_phase(freqs, chirp_mass, z, lambda_g):
         Source redshift.
     lambda_g : float
         Graviton Compton wavelength in metres.
+    f_c : float
+        Cutoff frequency in Hz (typically the maximum frequency).
 
     Returns
     -------
@@ -97,7 +101,9 @@ def _additional_phase(freqs, chirp_mass, z, lambda_g):
     M = chirp_mass * _M_SUN_SEC * (1 + z)   # chirp mass in seconds
     u = np.pi * M * freqs                    # dimensionless PN parameter
     beta = np.pi**2 * _C * _D_alpha(0, z) * M / (lambda_g**2 * (1 + z))
-    delta_psi = -beta * u**(-1)
+    constant_terms = (-1 * np.pi * _D_alpha(0, z) / ((1 + z) * lambda_g**2 * f_c**2)
+                      + np.pi * _D_alpha(0, z) / (lambda_g**2 * (1 + z) * f_c))
+    delta_psi = -beta * u**(-1) + constant_terms
     return delta_psi
 
 
@@ -905,7 +911,9 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
 
         freqs = hp_fd.sample_frequencies.numpy()[1:]
         lg = params.get('lambda_g', lambda_g)  # per-sample overrides function-level
-        phase_shift = _additional_phase(freqs, chirp_mass, z, lg)
+        hp_fd_amp = np.abs(hp_fd.numpy()[1:])
+        f_c = float(np.max(freqs[np.nonzero(hp_fd_amp)]))  # max freq with non-zero amplitude
+        phase_shift = _additional_phase(freqs, chirp_mass, z, lg, f_c)
 
         hp_array = hp_fd.numpy().copy()
         hc_array = hc_fd.numpy().copy()

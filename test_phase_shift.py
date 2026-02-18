@@ -1,6 +1,7 @@
 """Diagnostic: scan lambda_g values and check if the phase shift changes."""
 import numpy as np
 from scipy.integrate import quad
+from pycbc.waveform import get_fd_waveform
 
 C = 2.998e8                          # speed of light, m/s
 G = 6.674e-11                        # gravitational constant, m^3 kg^-1 s^-2
@@ -17,17 +18,27 @@ def D_alpha(alpha, z):
     integrand = quad(lambda z_prime: (1 + z_prime)**(alpha - 2) / np.sqrt(OMEGA_M * (1 + z_prime)**3 + OMEGA_LAMBDA), 0, z)
     return C * (1 + z) / H0 * integrand[0]  # metres
 
-def additional_phase(freqs, chirp_mass, z, lambda_g, mass1, mass2):
+def additional_phase(freqs, chirp_mass, z, lambda_g, f_c):
     M = chirp_mass * M_SUN_SEC * (1 + z)  # seconds
     u = np.pi * M * freqs                 # dimensionless
     beta = np.pi**2 * C * D_alpha(0, z) * M / (lambda_g**2 * (1 + z))  # dimensionless
-    delta_psi = -beta * u**(-1)
+    constant_terms = (-1 * np.pi * D_alpha(0, z) / ((1 + z) * lambda_g**2 * f_c**2)
+                      + np.pi * D_alpha(0, z) / (lambda_g**2 * (1 + z) * f_c))
+    delta_psi = -beta * u**(-1) + constant_terms
     return delta_psi
 
 chirp_mass = (M1 * M2)**(3/5) / (M1 + M2)**(1/5)
 z = 0.1
 test_freq = 100.0
 freqs = np.array([test_freq])
+
+# Generate waveform to derive f_c from non-zero amplitude range
+hp_fd, _ = get_fd_waveform(
+    approximant='IMRPhenomD', mass1=M1, mass2=M2,
+    delta_f=1.0/256, f_lower=30.0, f_final=2048.0, distance=410.0
+)
+fd_freqs = hp_fd.sample_frequencies.numpy()[1:]
+f_c = float(np.max(fd_freqs[np.nonzero(np.abs(hp_fd.numpy()[1:]))]))
 
 # Break down the three terms separately (with correct units)
 M = chirp_mass * M_SUN_SEC * (1 + z)  # seconds
@@ -60,7 +71,9 @@ for lambda_g in [1e10, 1e12, 1e14, 1e16, 1e18, 1e20, np.inf]:
         beta_term = 0.0
     else:
         beta = np.pi**2 * C * D * M / (lambda_g**2 * (1 + z))
-        beta_term = -beta * u**(-1)
+        constant_terms = (-1 * np.pi * D / ((1 + z) * lambda_g**2 * f_c**2)
+                          + np.pi * D / (lambda_g**2 * (1 + z) * f_c))
+        beta_term = -beta * u**(-1) + constant_terms
     total = beta_term + pn_term1 + pn_term2
     if total != 0:
         pct = abs(beta_term / total) * 100
@@ -72,8 +85,8 @@ print()
 print("=== Key insight ===")
 gr_phase = pn_term1 + pn_term2
 print(f"Phase with lambda_g=inf (GR limit): {gr_phase:.6e}")
-print(f"Phase with lambda_g=1e16:           {additional_phase(freqs, chirp_mass, z, 1e16, M1, M2)[0]:.6e}")
-print(f"Phase with lambda_g=1e12:           {additional_phase(freqs, chirp_mass, z, 1e12, M1, M2)[0]:.6e}")
+print(f"Phase with lambda_g=1e16:           {additional_phase(freqs, chirp_mass, z, 1e16, f_c)[0]:.6e}")
+print(f"Phase with lambda_g=1e12:           {additional_phase(freqs, chirp_mass, z, 1e12, f_c)[0]:.6e}")
 print()
 
 if abs(pn_term1 + pn_term2) > 0:
