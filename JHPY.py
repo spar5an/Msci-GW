@@ -40,6 +40,7 @@ _M_SUN_SEC = _G * _M_SUN / _C**3     # solar mass in seconds (~4.926e-6 s)
 _H0 = 67.4e3 / _MPC                  # Hubble constant in 1/s
 _OMEGA_M = 0.315
 _OMEGA_LAMBDA = 0.685
+_M_OMEGA_PN = 0.1       # PN breakdown: (m1+m2)·omega = 0.1 (geometric units G=c=1)
 
 
 def _D_alpha(alpha, z):
@@ -70,7 +71,7 @@ def _D_alpha(alpha, z):
     return _C * (1 + z) / _H0 * integrand_result[0]
 
 
-def _additional_phase(freqs, chirp_mass, z, lambda_g, f_c):
+def _additional_phase(freqs, chirp_mass, z, lambda_g, f_c, f_pn_cutoff=None):
     """
     Compute massive graviton phase shift for a frequency array.
 
@@ -91,7 +92,12 @@ def _additional_phase(freqs, chirp_mass, z, lambda_g, f_c):
     lambda_g : float
         Graviton Compton wavelength in metres.
     f_c : float
-        Cutoff frequency in Hz (typically the maximum frequency).
+        Cutoff frequency in Hz (typically the maximum waveform frequency).
+    f_pn_cutoff : float or None, optional
+        Post-Newtonian breakdown frequency in Hz, from (m1+m2)·omega = 0.1.
+        If given, the phase is forced to zero above this frequency — the PN
+        dispersion formula is not valid beyond the inspiral regime.
+        Default None (no cutoff applied, backward-compatible).
 
     Returns
     -------
@@ -104,7 +110,272 @@ def _additional_phase(freqs, chirp_mass, z, lambda_g, f_c):
     constant_terms = (-1 * np.pi * _D_alpha(0, z) / ((1 + z) * lambda_g**2 * f_c**2)
                       + np.pi * _D_alpha(0, z) / (lambda_g**2 * (1 + z) * f_c))
     delta_psi = -beta * u**(-1) + constant_terms
+    if f_pn_cutoff is not None:
+        delta_psi = np.where(freqs <= f_pn_cutoff, delta_psi, 0.0)
     return delta_psi
+
+
+def _additional_phase_lv(freqs, chirp_mass, z, lambda_g, alpha_lv, A_lv, f_c,
+                          f_pn_cutoff=None):
+    """
+    Compute the generalized Lorentz-violating (LV) phase shift.
+
+    Implements the parametrized modified dispersion relation of Mirshekari,
+    Yunes & Will (2011), arXiv:1110.2720:
+
+        E² = p²c² + m_g²c⁴ + A_physical · p^α · c^α          [Eq. 1]
+
+    where A_physical has units [energy]^{2−α}.  The paper re-packages this
+    as the LV Compton wavelength (Eq. 13):
+
+        A  ≡  A_physical^{1/(α−2)}       [always has units of metres]
+
+    The total phase correction (Eq. 28, α ≠ 1, 2) is:
+
+        δΨ = −β u^{−1} − ζ u^{α−1}
+
+    where the massive graviton part (β term) is identical to _additional_phase
+    and the Lorentz-violating ζ term is computed from A_lv via Eqs. 30, 32:
+
+        ζ = π^{2−α}/(1−α) · c^{1−α} · D_α · M^{1−α}
+                          / (A^{2−α} · (1+Z)^{1−α})     [α ≠ 1, 2]
+        ζ = D_1 / A                                       [α = 1, Eq. 32]
+
+    The ppE mapping (Eq. 34):  β_ppE = −ζ,  b_ppE = α − 1.
+
+    Special cases:
+        α = 0   : degenerate with massive graviton (A → λ_g)
+        α = 1   : logarithmic correction (Eq. 31)
+        α = 2   : degenerate with time of coalescence — no observable effect
+        α = 2.5 : non-commutative geometry
+        α = 3   : doubly special relativity (DSR)
+        α = 4   : extra dimensions / Horava-Lifshitz gravity
+
+    Parameters
+    ----------
+    freqs : np.ndarray
+        Frequency array in Hz (must not contain zeros).
+    chirp_mass : float
+        Chirp mass in solar masses.
+    z : float
+        Source redshift.
+    lambda_g : float
+        Graviton Compton wavelength in metres. Use np.inf to suppress the
+        massive graviton term.
+    alpha_lv : float
+        LV dispersion exponent α in the modified dispersion relation.
+    A_lv : float
+        LV Compton wavelength in metres (A ≡ A_physical^{1/(α−2)}).
+        Use np.inf to suppress the LV term (GR + massive-graviton limit).
+    f_c : float
+        Cutoff frequency in Hz (typically the maximum waveform frequency).
+        The LV phase is normalised to zero at f_c.
+    f_pn_cutoff : float or None, optional
+        Post-Newtonian breakdown frequency in Hz, from (m1+m2)·omega = 0.1.
+        If given, the total phase is forced to zero above this frequency — the
+        PN dispersion formula is not valid beyond the inspiral regime.
+        Default None (no cutoff applied, backward-compatible).
+
+    Returns
+    -------
+    np.ndarray
+        Total phase shift in radians, same shape as freqs.
+    """
+    M   = chirp_mass * _M_SUN_SEC * (1 + z)   # detector-frame chirp mass [s]
+    u   = np.pi * M * freqs                    # dimensionless PN frequency
+    u_c = np.pi * M * f_c
+
+    # ── Massive graviton term (same as _additional_phase) ─────────────────────
+    if np.isfinite(lambda_g) and lambda_g > 0:
+        beta_g = np.pi**2 * _C * _D_alpha(0, z) * M / (lambda_g**2 * (1 + z))
+        constant_terms = (
+            -np.pi * _D_alpha(0, z) / ((1 + z) * lambda_g**2 * f_c**2)
+            + np.pi * _D_alpha(0, z) / (lambda_g**2 * (1 + z) * f_c)
+        )
+        delta_psi_mg = -beta_g * u**(-1) + constant_terms
+    else:
+        delta_psi_mg = np.zeros_like(freqs)
+
+    # ── Lorentz-violating term (Mirshekari et al. 2011, Eqs. 28–32) ──────────
+    if not np.isfinite(A_lv) or A_lv <= 0 or alpha_lv == 2.0:
+        # A_lv = inf  → GR / massive-graviton-only limit
+        # alpha_lv = 2 → degenerate with time of coalescence
+        delta_psi_lv = np.zeros_like(freqs)
+    elif alpha_lv == 1.0:
+        # Eq. 32:  ζ = D_1 / A  (both in metres → dimensionless)
+        # Eq. 31:  δΨ_LV = +ζ · (ln u − ln u_c)
+        zeta = _D_alpha(1, z) / A_lv
+        delta_psi_lv = zeta * (np.log(u) - np.log(u_c))
+    else:
+        # Eq. 30 (SI):  ζ = π^{2−α}/(1−α) · c^{1−α} · D_α · M^{1−α}
+        #                             / (A^{2−α} · (1+Z)^{1−α})
+        zeta = (
+            np.pi**(2 - alpha_lv) / (1 - alpha_lv)
+            * _C**(1 - alpha_lv)
+            * _D_alpha(alpha_lv, z)
+            * M**(1 - alpha_lv)
+            / (A_lv**(2 - alpha_lv) * (1 + z)**(1 - alpha_lv))
+        )
+        # Eq. 28:  δΨ_LV = −ζ · u^{α−1},  normalised to zero at u_c
+        delta_psi_lv = -zeta * (u**(alpha_lv - 1) - u_c**(alpha_lv - 1))
+
+    total_phase = delta_psi_mg + delta_psi_lv
+    if f_pn_cutoff is not None:
+        total_phase = np.where(freqs <= f_pn_cutoff, total_phase, 0.0)
+    return total_phase
+
+
+def _generate_single_lv_waveform(params: dict, time_resolution: float,
+                                  approximant: str, f_lower: float,
+                                  detectors: list, target_length: int,
+                                  add_noise: bool, lambda_g: float,
+                                  alpha_lv: float, A_lv: float,
+                                  f_final: float) -> dict:
+    """
+    Worker function to generate a single Lorentz-violating (LV) GW waveform.
+
+    Identical pipeline to _generate_single_modified_waveform but applies the
+    generalized LV phase from Mirshekari, Yunes & Will (2011), arXiv:1110.2720,
+    instead of the pure massive graviton phase from Will (1997), arXiv:9709011.
+
+    Parameters
+    ----------
+    params : dict
+        Waveform parameters. Required: 'mass1', 'mass2'.
+        Optional: 'redshift' (default 0.1), plus sky/orientation params.
+    time_resolution : float
+        Time step delta_t in seconds.
+    approximant : str
+        FD-capable waveform approximant (e.g. 'IMRPhenomD').
+    f_lower : float
+        Lower frequency cutoff in Hz.
+    detectors : list of str
+        Detector names, e.g. ['H1', 'L1'].
+    target_length : int
+        Desired number of output samples.
+    add_noise : bool
+        Whether to add aLIGO noise.
+    lambda_g : float
+        Graviton Compton wavelength in metres. Use np.inf for GR (no mass term).
+    alpha_lv : float
+        LV dispersion exponent (α_LV). Key values: 3 (DSR), 4 (Horava-Lifshitz).
+    A_lv : float
+        LV Compton wavelength in metres (A ≡ A_physical^{1/(α−2)}).
+        Use np.inf to suppress the LV term (pure massive-graviton or GR).
+    f_final : float
+        Upper frequency cutoff in Hz.
+
+    Returns
+    -------
+    dict
+        Keys: 'success', 'detectors', 'params', optionally 'error'.
+    """
+    try:
+        delta_f = 1.0 / 256
+
+        hp_fd, hc_fd = get_fd_waveform(
+            approximant=approximant,
+            mass1=params['mass1'],
+            mass2=params['mass2'],
+            spin1z=params.get('spin1z', 0.0),
+            spin2z=params.get('spin2z', 0.0),
+            inclination=params.get('inclination', 0.0),
+            coa_phase=params.get('coa_phase', 0.0),
+            distance=params.get('distance', 410.0),
+            delta_f=delta_f,
+            f_lower=f_lower,
+            f_final=f_final
+        )
+
+        m1 = params['mass1']
+        m2 = params['mass2']
+        chirp_mass = (m1 * m2)**(3.0 / 5.0) / (m1 + m2)**(1.0 / 5.0)
+        z = params.get('redshift', 0.1)
+
+        freqs = hp_fd.sample_frequencies.numpy()[1:]
+        hp_fd_amp = np.abs(hp_fd.numpy()[1:])
+        f_c = float(np.max(freqs[np.nonzero(hp_fd_amp)]))
+
+        # Per-sample overrides for lambda_g / A_lv
+        lg    = params.get('lambda_g', lambda_g)
+        a_lv  = params.get('A_lv', A_lv)
+
+        # PN breakdown frequency: phase modification is only valid in the inspiral
+        f_pn = _M_OMEGA_PN / (np.pi * (m1 + m2) * _M_SUN_SEC)
+
+        phase_shift = _additional_phase_lv(freqs, chirp_mass, z, lg,
+                                            alpha_lv, a_lv, f_c,
+                                            f_pn_cutoff=f_pn)
+
+        hp_array = hp_fd.numpy().copy()
+        hc_array = hc_fd.numpy().copy()
+        hp_array[1:] = hp_array[1:] * np.exp(1j * phase_shift)
+        hc_array[1:] = hc_array[1:] * np.exp(1j * phase_shift)
+
+        hp_raw = np.fft.irfft(hp_array)
+        hc_raw = np.fft.irfft(hc_array)
+        N = len(hp_raw)
+        hp_raw *= delta_f * N
+        hc_raw *= delta_f * N
+
+        n_ringdown = 500
+        if target_length <= N:
+            n_pre = target_length - n_ringdown
+            hp_arr = np.concatenate([hp_raw[N - n_pre:], hp_raw[:n_ringdown]])
+            hc_arr = np.concatenate([hc_raw[N - n_pre:], hc_raw[:n_ringdown]])
+        else:
+            hp_arr = np.concatenate([np.zeros(target_length - N), hp_raw])
+            hc_arr = np.concatenate([np.zeros(target_length - N), hc_raw])
+
+        hp_ts = TimeSeries(hp_arr.astype(np.float64), delta_t=time_resolution)
+        hc_ts = TimeSeries(hc_arr.astype(np.float64), delta_t=time_resolution)
+
+        gps_time = params.get('gps_time', 1126259462.4)
+        hp_ts.start_time += gps_time
+        hc_ts.start_time += gps_time
+
+        ra = params.get('ra', 0.0)
+        dec = params.get('dec', np.pi / 2)
+        polarization = params.get('polarization', 0.0)
+
+        detector_signals = {}
+        for det_name in detectors:
+            detector = Detector(det_name)
+            signal = detector.project_wave(hp_ts, hc_ts, ra, dec, polarization, method='lal')
+
+            sig_array = np.array(signal)
+            signal_len = len(sig_array)
+            if signal_len > target_length:
+                sig_array = sig_array[signal_len - target_length:]
+            elif signal_len < target_length:
+                sig_array = np.concatenate([
+                    np.zeros(target_length - signal_len, dtype=sig_array.dtype),
+                    sig_array
+                ])
+
+            detector_signals[det_name] = TimeSeries(
+                sig_array, delta_t=signal.delta_t, epoch=signal.start_time)
+
+        if add_noise:
+            for det_name in detectors:
+                signal = detector_signals[det_name]
+                delta_t = signal.delta_t
+                duration = target_length * delta_t
+                delta_f_noise = 1.0 / duration
+                flen = target_length // 2 + 1
+                psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
+                noise = noise_from_psd(target_length, delta_t, psd)
+                noise._epoch = signal._epoch
+                detector_signals[det_name] = signal.inject(noise)
+
+        return {
+            'success': True,
+            'detectors': detector_signals,
+            'params': params
+        }
+
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'params': params}
 
 
 ################### Miscellaneous functions ###################
@@ -913,7 +1184,12 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
         lg = params.get('lambda_g', lambda_g)  # per-sample overrides function-level
         hp_fd_amp = np.abs(hp_fd.numpy()[1:])
         f_c = float(np.max(freqs[np.nonzero(hp_fd_amp)]))  # max freq with non-zero amplitude
-        phase_shift = _additional_phase(freqs, chirp_mass, z, lg, f_c)
+
+        # PN breakdown frequency: phase modification is only valid in the inspiral
+        f_pn = _M_OMEGA_PN / (np.pi * (m1 + m2) * _M_SUN_SEC)
+
+        phase_shift = _additional_phase(freqs, chirp_mass, z, lg, f_c,
+                                        f_pn_cutoff=f_pn)
 
         hp_array = hp_fd.numpy().copy()
         hc_array = hc_fd.numpy().copy()
