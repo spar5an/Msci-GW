@@ -20,6 +20,7 @@ from pycbc.noise import noise_from_psd
 from pycbc.types import TimeSeries, FrequencySeries
 from pycbc.psd import welch, interpolate
 from pycbc.filter import highpass_fir, lowpass_fir, resample_to_delta_t
+from o4_psd import build_o4_psd_cache, load_random_o4_psd, _DEFAULT_CACHE, _DEFAULT_N_SEGS
 
 
 ################### Cosmological / Modified Gravity Constants ###################
@@ -366,7 +367,7 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
             detector = Detector(det_name)
             signal = detector.project_wave(hp_ts, hc_ts, ra, dec, polarization, method='lal')
 
-            sig_array = np.array(signal)
+            sig_array = signal.numpy()
             signal_len = len(sig_array)
             if signal_len > target_length:
                 sig_array = sig_array[signal_len - target_length:]
@@ -386,7 +387,7 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
                 duration = target_length * delta_t
                 delta_f_noise = 1.0 / duration
                 flen = target_length // 2 + 1
-                psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
+                psd = load_random_o4_psd(flen, delta_f_noise, f_lower, det_name, int(round(1.0 / delta_t)))
                 noise = noise_from_psd(target_length, delta_t, psd)
                 noise._epoch = signal._epoch
                 detector_signals[det_name] = signal.inject(noise)
@@ -707,7 +708,7 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
             detector = Detector(det_name)
             signal = detector.project_wave(hp_ts, hc_ts, ra, dec, polarization, method='lal')
 
-            sig_array = np.array(signal)
+            sig_array = signal.numpy()
             signal_len = len(sig_array)
             if signal_len >= target_length:
                 sig_array = sig_array[signal_len - target_length:]
@@ -730,7 +731,7 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
 
                 flen = target_length // 2 + 1
 
-                psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
+                psd = load_random_o4_psd(flen, delta_f, f_lower, det_name, int(round(1.0 / delta_t)))
                 noise = noise_from_psd(target_length, delta_t, psd)
                 noise._epoch = signal._epoch
                 detector_signals[det_name] = signal.inject(noise)
@@ -900,7 +901,7 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
             detector = Detector(det_name)
             signal = detector.project_wave(hp_ts, hc_ts, ra, dec, polarization, method='lal')
 
-            sig_array = np.array(signal)
+            sig_array = signal.numpy()
             signal_len = len(sig_array)
             if signal_len > target_length:
                 sig_array = sig_array[signal_len - target_length:]
@@ -917,7 +918,7 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
                 duration = target_length * delta_t
                 delta_f_noise = 1.0 / duration
                 flen = target_length // 2 + 1
-                psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
+                psd = load_random_o4_psd(flen, delta_f_noise, f_lower, det_name, int(round(1.0 / delta_t)))
                 noise = noise_from_psd(target_length, delta_t, psd)
                 noise._epoch = signal._epoch
                 detector_signals[det_name] = signal.inject(noise)
@@ -971,6 +972,56 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
                     pool.imap_unordered(worker_func, param_dicts, chunksize=100),
                     total=len(param_dicts),
                     desc="Generating modified waveforms"
+                ))
+            else:
+                results = list(pool.imap_unordered(worker_func, param_dicts, chunksize=100))
+
+    return results
+
+
+def _generate_lv_waveforms_parallel(param_dicts: List[Dict],
+                                     time_resolution: float,
+                                     approximant: str,
+                                     f_lower: float,
+                                     num_workers: int,
+                                     show_progress: bool,
+                                     detectors: List[str],
+                                     target_length: int,
+                                     add_noise: bool,
+                                     lambda_g: float,
+                                     alpha_lv: float,
+                                     A_lv: float,
+                                     f_final: float,
+                                     highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
+    """Generate Lorentz-violating waveforms in parallel using multiprocessing."""
+    worker_func = partial(
+        _generate_single_lv_waveform,
+        time_resolution=time_resolution,
+        approximant=approximant,
+        f_lower=f_lower,
+        detectors=detectors,
+        target_length=target_length,
+        add_noise=add_noise,
+        lambda_g=lambda_g,
+        alpha_lv=alpha_lv,
+        A_lv=A_lv,
+        f_final=f_final,
+        highpass_fc=highpass_fc,
+    )
+
+    if num_workers == 1:
+        iterable = map(worker_func, param_dicts)
+        if show_progress:
+            results = list(tqdm(iterable, total=len(param_dicts), desc="Generating LV waveforms"))
+        else:
+            results = list(iterable)
+    else:
+        with Pool(processes=num_workers) as pool:
+            if show_progress:
+                results = list(tqdm(
+                    pool.imap_unordered(worker_func, param_dicts, chunksize=100),
+                    total=len(param_dicts),
+                    desc="Generating LV waveforms"
                 ))
             else:
                 results = list(pool.imap_unordered(worker_func, param_dicts, chunksize=100))
@@ -1084,6 +1135,11 @@ def pycbc_data_generator(config: Dict[str, Callable],
     print(f"Target signal length: {target_length} samples ({signal_length}s at {time_resolution}s resolution)")
     print(f"Noise injection: {'enabled' if add_noise else 'disabled'}")
 
+    if add_noise:
+        _sample_rate = int(round(1.0 / time_resolution))
+        for _det in detectors:
+            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=_DEFAULT_CACHE)
+
     param_dicts = _generate_parameter_sets(config, num_samples)
 
     all_successful = []
@@ -1194,7 +1250,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
     }
 
 
-def pycbc_modified_data_generator(config: Dict[str, Callable],
+def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
                                    num_samples: int,
                                    lambda_g: float = None,
                                    time_resolution: float = 1/4096,
@@ -1212,7 +1268,7 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
                                    detectors: List[str] = None,
                                    add_noise: bool = True) -> Dict:
     """
-    Generate modified (massive graviton) waveforms projected to detectors.
+    Generate massive gravity waveforms projected to detectors.
     Returns PyTorch DataLoaders for training, validation, and testing.
 
     Mirrors pycbc_data_generator but applies a massive graviton phase
@@ -1298,6 +1354,11 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
     print(f"  Detectors: {detectors}")
     print(f"  Target signal length: {target_length} samples ({signal_length}s at {time_resolution}s resolution)")
     print(f"  Noise injection: {'enabled' if add_noise else 'disabled'}")
+
+    if add_noise:
+        _sample_rate = int(round(1.0 / time_resolution))
+        for _det in detectors:
+            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=_DEFAULT_CACHE)
 
     param_dicts = _generate_parameter_sets(config, num_samples)
 
@@ -1408,7 +1469,262 @@ def pycbc_modified_data_generator(config: Dict[str, Callable],
             'add_noise': add_noise,
             'lambda_g': lambda_g,
             'lambda_g_varied': lambda_g_in_config,
-            'modified': True,
+            'waveform_type': 'massive_gravity',
+            'preprocessing': {}
+        }
+    }
+
+
+def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
+                                            num_samples: int,
+                                            alpha_lv: float,
+                                            A_lv: float = None,
+                                            lambda_g: float = None,
+                                            time_resolution: float = 1/4096,
+                                            approximant: str = 'IMRPhenomD',
+                                            f_lower: float = 30.0,
+                                            f_final: float = 2048.0,
+                                            highpass_fc: float = _HIGHPASS_FC,
+                                            num_workers: int = None,
+                                            signal_length: float = 2.0,
+                                            batch_size: int = 256,
+                                            chunk_size: int = 10000,
+                                            train_split: float = 0.8,
+                                            val_split: float = 0.1,
+                                            show_progress: bool = True,
+                                            detectors: List[str] = None,
+                                            add_noise: bool = True) -> Dict:
+    """
+    Generate Lorentz-violating (LV) waveforms projected to detectors.
+    Returns PyTorch DataLoaders for training, validation, and testing.
+
+    Mirrors pycbc_massive_gravity_data_generator but applies the generalised
+    LV phase from Mirshekari, Yunes & Will (2011), arXiv:1110.2720, which
+    combines a massive graviton term (lambda_g) with a power-law LV term
+    (alpha_lv, A_lv).
+
+    Parameters
+    ----------
+    config : dict
+        Dictionary mapping parameter names to numpy distribution functions.
+        Required: 'mass1', 'mass2'. Optional: 'redshift' (default 0.1),
+        'lambda_g' (per-sample override), 'A_lv' (per-sample override),
+        plus all standard sky/orientation params.
+    num_samples : int
+        Total number of waveforms to generate.
+    alpha_lv : float
+        LV dispersion exponent. Key values: 2.5 (non-commutative geometry),
+        3.0 (doubly special relativity), 4.0 (extra dimensions / Horava-Lifshitz).
+    A_lv : float, optional
+        LV Compton wavelength in metres (dataset-level constant).
+        If None, 'A_lv' must be provided in config as a per-sample distribution.
+        If both are given, the config (per-sample) takes precedence.
+        Set to np.inf to suppress the LV term (pure massive-graviton limit).
+    lambda_g : float, optional
+        Graviton Compton wavelength in metres. Use np.inf to suppress the mass
+        term (pure LV limit). If None, 'lambda_g' must be in config or
+        lambda_g defaults to np.inf.
+    time_resolution : float
+        Time step delta_t. Default: 1/4096
+    approximant : str
+        FD waveform approximant. Default: 'IMRPhenomD'
+    f_lower : float
+        Lower frequency cutoff in Hz. Default: 30.0
+    f_final : float
+        Upper frequency cutoff in Hz. Default: 2048.0
+    num_workers : int
+        Parallel processes. Default: 1
+    signal_length : float
+        Duration in seconds. Default: 2.0
+    batch_size : int
+        DataLoader batch size. Default: 256
+    chunk_size : int
+        Chunk size for memory. Default: 10000
+    train_split : float
+        Training fraction. Default: 0.8
+    val_split : float
+        Validation fraction. Default: 0.1
+    show_progress : bool
+        Show tqdm progress bar. Default: True
+    detectors : list of str
+        Detector names. Default: ['H1', 'L1']
+    add_noise : bool
+        Whether to add detector noise. Default: True
+
+    Returns
+    -------
+    dict with 'train_loader', 'val_loader', 'test_loader', 'metadata'
+    """
+    _validate_config(config)
+    if num_samples <= 0:
+        raise ValueError("num_samples must be positive")
+    if not 0 < train_split < 1 or not 0 < val_split < 1:
+        raise ValueError("train_split and val_split must be between 0 and 1")
+    if train_split + val_split >= 1:
+        raise ValueError("train_split + val_split must be < 1")
+
+    A_lv_in_config = 'A_lv' in config
+    if A_lv is None and not A_lv_in_config:
+        raise ValueError("A_lv must be provided either as an argument or in config")
+    if A_lv is not None and A_lv <= 0:
+        raise ValueError("A_lv must be positive")
+
+    lambda_g_in_config = 'lambda_g' in config
+    # lambda_g defaults to np.inf (suppress mass term) if not given
+    if lambda_g is None and not lambda_g_in_config:
+        lambda_g = np.inf
+    if lambda_g is not None and lambda_g <= 0:
+        raise ValueError("lambda_g must be positive")
+
+    if num_workers is None:
+        num_workers = 1
+
+    if detectors is None:
+        detectors = ['H1', 'L1']
+
+    sky_params_provided = {
+        'ra': 'ra' in config,
+        'dec': 'dec' in config,
+        'polarization': 'polarization' in config,
+        'gps_time': 'gps_time' in config
+    }
+
+    target_length = int(signal_length / time_resolution)
+    print(f"Generating {num_samples} LORENTZ-VIOLATING waveforms (alpha_lv={alpha_lv})")
+    if A_lv_in_config:
+        print(f"  A_lv=per-sample from config")
+    else:
+        print(f"  A_lv={A_lv:.2e} m")
+    if lambda_g_in_config:
+        print(f"  lambda_g=per-sample from config")
+    elif np.isinf(lambda_g):
+        print(f"  lambda_g=inf (mass term suppressed)")
+    else:
+        print(f"  lambda_g={lambda_g:.2e} m")
+    print(f"  Approximant: {approximant} (frequency domain)")
+    print(f"  Frequency range: {f_lower}-{f_final} Hz")
+    print(f"  Detectors: {detectors}")
+    print(f"  Target signal length: {target_length} samples ({signal_length}s at {time_resolution}s resolution)")
+    print(f"  Noise injection: {'enabled' if add_noise else 'disabled'}")
+
+    if add_noise:
+        _sample_rate = int(round(1.0 / time_resolution))
+        for _det in detectors:
+            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=_DEFAULT_CACHE)
+
+    param_dicts = _generate_parameter_sets(config, num_samples)
+
+    all_successful = []
+    all_failed = []
+    num_chunks = (num_samples + chunk_size - 1) // chunk_size
+
+    for chunk_idx in range(num_chunks):
+        chunk_start = chunk_idx * chunk_size
+        chunk_end = min(chunk_start + chunk_size, num_samples)
+        chunk_params = param_dicts[chunk_start:chunk_end]
+
+        if num_chunks > 1:
+            print(f"\nChunk {chunk_idx + 1}/{num_chunks} ({len(chunk_params)} waveforms)...")
+
+        chunk_results = _generate_lv_waveforms_parallel(
+            chunk_params, time_resolution, approximant, f_lower,
+            num_workers, show_progress, detectors, target_length,
+            add_noise, lambda_g, alpha_lv, A_lv, f_final, highpass_fc
+        )
+
+        for r in chunk_results:
+            if r['success']:
+                all_successful.append(r)
+            else:
+                all_failed.append(r)
+
+        if num_chunks > 1:
+            print(f"  Chunk: {len([r for r in chunk_results if r['success']])} successful")
+
+    if not all_successful:
+        raise RuntimeError("No waveforms were successfully generated!")
+
+    num_success = len(all_successful)
+    num_failed = len(all_failed)
+    print(f"\nGeneration complete: {num_success} successful, {num_failed} failed")
+
+    print(f"\nProcessing {num_success} waveforms...")
+
+    param_names = list(all_successful[0]['params'].keys())
+    num_params = len(param_names)
+    detector_names = list(all_successful[0]['detectors'].keys())
+    num_detectors = len(detector_names)
+
+    print(f"  Detector channels: {detector_names}")
+    print(f"  All signals fixed to: {target_length} samples ({signal_length}s)")
+
+    signal_array = np.empty((num_success, num_detectors, target_length), dtype=np.float32)
+    param_array = np.empty((num_success, num_params), dtype=np.float32)
+
+    print(f"  Extracting signals and parameters...")
+
+    for i, waveform_data in enumerate(all_successful):
+        for j, param_name in enumerate(param_names):
+            param_array[i, j] = waveform_data['params'][param_name]
+        for k, det_name in enumerate(detector_names):
+            signal_array[i, k, :] = waveform_data['detectors'][det_name]
+
+    print(f"  Converting to PyTorch tensors...")
+
+    X = torch.from_numpy(signal_array)
+    y = torch.from_numpy(param_array)
+
+    print(f"  Tensors: X={X.shape}, y={y.shape}")
+
+    dataset = TensorDataset(X, y)
+    total_size = len(dataset)
+    train_size = int(train_split * total_size)
+    val_size = int(val_split * total_size)
+    test_size = total_size - train_size - val_size
+
+    train_data, val_data, test_data = random_split(
+        dataset, [train_size, val_size, test_size]
+    )
+
+    print(f"  Splits: train={train_size}, val={val_size}, test={test_size}")
+
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
+
+    print(f"\nReady! DataLoaders with batch_size={batch_size}")
+
+    return {
+        'train_loader': train_loader,
+        'val_loader': val_loader,
+        'test_loader': test_loader,
+        'metadata': {
+            'parameter_names': param_names,
+            'num_samples': num_success,
+            'num_failed': num_failed,
+            'waveform_shape': tuple(X.shape[1:]),
+            'channels': detector_names,
+            'train_size': train_size,
+            'val_size': val_size,
+            'test_size': test_size,
+            'batch_size': batch_size,
+            'time_resolution': time_resolution,
+            'approximant': approximant,
+            'f_lower': f_lower,
+            'f_final': f_final,
+            'highpass_fc': highpass_fc,
+            'detectors': detector_names,
+            'target_length': target_length,
+            'signal_length': signal_length,
+            'chunk_size': chunk_size,
+            'sky_params_provided': sky_params_provided,
+            'add_noise': add_noise,
+            'alpha_lv': alpha_lv,
+            'A_lv': A_lv,
+            'A_lv_varied': A_lv_in_config,
+            'lambda_g': lambda_g,
+            'lambda_g_varied': lambda_g_in_config,
+            'waveform_type': 'lorentz_violation',
             'preprocessing': {}
         }
     }
