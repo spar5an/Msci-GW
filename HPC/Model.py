@@ -1612,7 +1612,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 NUM_EPOCHS = 200             
 BATCH_SIZE = 64            
 LEARNING_RATE = 1e-4
-RETRAIN = False             # Set to True to retrain even if saved model exists
+RETRAIN = True             # Set to True to retrain even if saved model exists
 
 # Data generation parameters
 ADD_NOISE = True           # Add realistic detector noise to waveforms
