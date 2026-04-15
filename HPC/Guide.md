@@ -4,7 +4,7 @@
 On your local machine:
 
 ```bash
-ssh hm2622@login.hpc.ic.ac.uk
+ssh hm2622@login.cx3.hpc.imperial.ac.uk
 ```
 
 On the cluster prompt, we’ll start clean each time with:
