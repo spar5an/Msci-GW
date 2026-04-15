@@ -1,0 +1,216 @@
+#!/bin/bash
+#PBS -N test_pycbc
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=4:mem=8gb:ngpus=1
+#PBS -o HPCOutputLogs/
+#PBS -e HPCOutputLogs/
+
+
+# 1) Clean module environment
+module purge
+
+# 2) Load the same modules as used to create the venv
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+module load CUDA/11.7.0
+
+# 3) Activate the SAME virtual environment where PyCBC is installed
+#    Use the FULL PATH you got from `realpath`
+source /rds/general/user/hm2622/home/venv/pycbcenv/bin/activate
+
+# Set memory allocator config (correct format for PyTorch 2.9)
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+# 4) Go to the directory from which qsub was run
+cd "$PBS_O_WORKDIR"
+
+# 5) Create output directories if they don't exist
+mkdir -p HPCOutputLogs
+mkdir -p Plots
+
+# 6) Debug information
+echo "=== DEBUG INFO ==="
+echo "hostname: $(hostname)"
+echo "pwd: $(pwd)"
+echo "which python: $(which python)"
+python -V
+
+
+echo "=== Try importing pycbc in PBS job ==="
+python -c "import pycbc, sys; print('pycbc OK in PBS'); print('pycbc file:', pycbc.__file__); print('python exe:', sys.executable)"
+
+echo "Host: $(hostname)"
+echo "GPUs visible to CUDA:"
+nvidia-smi || echo "nvidia-smi not available / no GPU?"
+
+
+
+# Start GPU monitoring in background (logs to separate file)
+echo "=== Starting GPU Monitor (logging to gpu_monitor.log and gpu_data.csv) ==="
+(
+  # Write CSV header
+  echo "timestamp,memory_used_mb,memory_percent" > HPCOutputLogs/gpu_data.csv
+  
+  while true; do 
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "=== $TIMESTAMP ===" >> HPCOutputLogs/gpu_monitor.log
+    nvidia-smi >> HPCOutputLogs/gpu_monitor.log
+    
+    # Extract GPU memory used and percent
+    GPU_DATA=$(nvidia-smi --query-gpu=memory.used,utilization.memory --format=csv,nounits,noheader | head -1)
+    if [ ! -z "$GPU_DATA" ]; then
+      MEMORY_USED=$(echo "$GPU_DATA" | awk '{print $1}')
+      MEMORY_PERCENT=$(echo "$GPU_DATA" | awk '{print $2}')
+      echo "$TIMESTAMP,$MEMORY_USED,$MEMORY_PERCENT" >> HPCOutputLogs/gpu_data.csv
+    fi
+    sleep 10
+  done
+) &
+MONITOR_PID=$!
+echo "GPU monitor started with PID: $MONITOR_PID"
+
+# Start training progress monitor in background
+echo "=== Starting Training Monitor (logging to training_progress.log) ==="
+(
+  # Wait for training log file to be created
+  sleep 5
+  
+  # Monitor for epoch information
+  tail -f HPCOutputLogs/${PBS_JOBID}.OU 2>/dev/null | while read line; do
+    # Filter for epoch-related output
+    if echo "$line" | grep -q "Epoch\|epoch\|Log Prob\|Training"; then
+      echo "$line" >> HPCOutputLogs/training_progress.log
+    fi
+  done
+) &
+TRAIN_MONITOR_PID=$!
+echo "Training monitor started with PID: $TRAIN_MONITOR_PID"
+
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
+#=======================================================================================
+
+echo "=== Run dingo_npe_gpu_two_detectors.py ==="
+echo "(Configuration will be output by the Python script)"
+python dingo_npe_gpu_two_detectors.py 2>&1 | tee HPCOutputLogs/python_output.log
+TRAIN_EXIT_CODE=$?
+
+# Kill monitoring processes
+echo "=== Stopping Monitors ==="
+kill $MONITOR_PID 2>/dev/null || true
+kill $TRAIN_MONITOR_PID 2>/dev/null || true
+wait $MONITOR_PID 2>/dev/null || true
+wait $TRAIN_MONITOR_PID 2>/dev/null || true
+
+# Get final memory stats
+echo "" >> HPCOutputLogs/gpu_monitor.log
+echo "=== FINAL GPU STATS ===" >> HPCOutputLogs/gpu_monitor.log
+nvidia-smi >> HPCOutputLogs/gpu_monitor.log 2>&1 || true
+
+# Create GPU usage plot from collected data
+echo "=== Generating GPU Usage Plot ==="
+python << 'PLOT_SCRIPT'
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for headless execution
+import matplotlib.pyplot as plt
+from datetime import datetime
+import os
+
+try:
+    # Read the CSV data manually (no pandas dependency)
+    csv_file = 'HPCOutputLogs/gpu_data.csv'
+    if not os.path.exists(csv_file):
+        print(f"⚠ GPU data file not found: {csv_file}")
+    else:
+        timestamps = []
+        memory_used = []
+        memory_percent = []
+        
+        with open(csv_file, 'r') as f:
+            lines = f.readlines()
+            if len(lines) <= 1:
+                print(f"⚠ GPU data file is empty")
+            else:
+                for line in lines[1:]:  # Skip header
+                    parts = line.strip().split(',')
+                    if len(parts) == 3:
+                        try:
+                            ts = parts[0]
+                            mem = float(parts[1])
+                            util = float(parts[2])
+                            timestamps.append(ts)
+                            memory_used.append(mem)
+                            memory_percent.append(util)
+                        except ValueError:
+                            continue
+        
+        if len(timestamps) > 0:
+            # Create figure with 2 subplots
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+            
+            # Plot GPU memory used (MB)
+            x_pos = range(len(timestamps))
+            ax1.plot(x_pos, memory_used, linewidth=2, color='steelblue', marker='o', markersize=3)
+            ax1.fill_between(x_pos, memory_used, alpha=0.3, color='steelblue')
+            ax1.set_xlabel('Sample Number', fontsize=11)
+            ax1.set_ylabel('GPU Memory Used (MB)', fontsize=11)
+            ax1.set_title('GPU Memory Usage Over Time', fontsize=13, fontweight='bold')
+            ax1.grid(True, alpha=0.3)
+            
+            # Plot GPU utilization percent
+            ax2.plot(x_pos, memory_percent, linewidth=2, color='darkorange', marker='s', markersize=3)
+            ax2.fill_between(x_pos, memory_percent, alpha=0.3, color='darkorange')
+            ax2.set_xlabel('Sample Number', fontsize=11)
+            ax2.set_ylabel('GPU Utilization (%)', fontsize=11)
+            ax2.set_title('GPU Utilization Over Time', fontsize=13, fontweight='bold')
+            ax2.grid(True, alpha=0.3)
+            ax2.set_ylim([0, 100])
+            
+            # Add summary statistics as text
+            max_memory = max(memory_used)
+            avg_memory = sum(memory_used) / len(memory_used)
+            max_util = max(memory_percent)
+            avg_util = sum(memory_percent) / len(memory_percent)
+            
+            summary_text = f"Max Memory: {max_memory:.0f} MB | Avg Memory: {avg_memory:.0f} MB\nMax Util: {max_util:.1f}% | Avg Util: {avg_util:.1f}%"
+            fig.text(0.5, 0.02, summary_text, ha='center', fontsize=10, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            plt.tight_layout(rect=[0, 0.04, 1, 1])
+            plot_file = 'HPCOutputLogs/gpu_usage.png'
+            plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+            print(f"✓ GPU usage plot saved to {plot_file}")
+            
+            # Also save statistics to a file
+            with open('HPCOutputLogs/gpu_stats.txt', 'w') as f:
+                f.write("GPU Usage Statistics\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"Maximum Memory Used: {max_memory:.0f} MB\n")
+                f.write(f"Average Memory Used: {avg_memory:.0f} MB\n")
+                f.write(f"Maximum Utilization: {max_util:.1f}%\n")
+                f.write(f"Average Utilization: {avg_util:.1f}%\n")
+                f.write(f"Number of samples: {len(timestamps)}\n")
+                f.write(f"First sample: {timestamps[0]}\n")
+                f.write(f"Last sample: {timestamps[-1]}\n")
+            print("✓ GPU statistics saved to HPCOutputLogs/gpu_stats.txt")
+        else:
+            print("⚠ No valid GPU data found in CSV file")
+            
+except Exception as e:
+    print(f"⚠ Error generating plot: {e}")
+    import traceback
+    traceback.print_exc()
+PLOT_SCRIPT
+
+# Display max memory from stats
+if [ -f "HPCOutputLogs/gpu_stats.txt" ]; then
+    echo ""
+    echo "=== GPU STATISTICS ==="
+    cat HPCOutputLogs/gpu_stats.txt
+fi
+
+echo "=== Done ==="
+exit $TRAIN_EXIT_CODE
+

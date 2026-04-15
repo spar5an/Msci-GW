@@ -1,3 +1,10 @@
 __pycache__/
 CLAUDE.md
 /.claude
+/HPCOutputLogs
+/eHPCOutputLogs
+/waveform_cache
+# Large model weights and data files
+*.pt
+HPC/test7_o4_whitened_all.csv
+HPC/test7_o4_psds_all.csv
