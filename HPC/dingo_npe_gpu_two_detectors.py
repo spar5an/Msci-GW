@@ -10,7 +10,8 @@ from scipy import stats
 import math
 import time
 from multiprocessing import Pool
-import data_generator_copy as data_generator
+import DataGenerator as data_generator
+import DataPipeline
 
 # Set random seed for reproducibility
 #torch.manual_seed(42)
@@ -901,6 +902,10 @@ def prepare_pycbc_data(num_samples=10000):
 #Configure EVERYTHING -------------------------------------------------------------------------------------------------------------------------------------------
 DENORMALIZE_PARAMETERS = True
 
+# Set to a path produced by GenerateDataset.py to skip data generation entirely.
+# Leave as None to generate data fresh on every run.
+DATASET_PATH = None   # e.g. '../datasets/dataset_gr_standard_N50000_abc123.pt'
+
 # Configure training data size
 NUM_TRAINING_SAMPLES = 50000  # Adjust this to control dataset size
 
@@ -917,257 +922,273 @@ NUM_EPOCHS = 200
 BATCH_SIZE = 64            
 LEARNING_RATE = 1e-4
 
-# ====================================================================================
-# PRINT CONFIGURATION (read from this script, not from PBS)
-# ====================================================================================
-print("\n" + "="*70)
-print("MODEL ARCHITECTURE PARAMETERS")
-print("="*70)
-print(f"  Parameter Dimension (PARAM_DIM):        {PARAM_DIM}")
-print(f"  Context Dimension (CONTEXT_DIM):        {CONTEXT_DIM}")
-print(f"  Number of Flow Layers (NUM_FLOW_LAYERS): {NUM_FLOW_LAYERS}")
-print(f"  Hidden Dimension (HIDDEN_DIM):          {HIDDEN_DIM}")
-print(f"  Embedding Type (EMBEDDING_TYPE):        {EMBEDDING_TYPE}")
 
-print("\n" + "="*70)
-print("TRAINING PARAMETERS")
-print("="*70)
-print(f"  Number of Epochs (NUM_EPOCHS):          {NUM_EPOCHS}")
-print(f"  Batch Size (BATCH_SIZE):                {BATCH_SIZE}")
-print(f"  Learning Rate (LEARNING_RATE):          {LEARNING_RATE}")
-print(f"  Training Samples (NUM_TRAINING_SAMPLES): {NUM_TRAINING_SAMPLES:,}")
-print(f"  Denormalize Output (DENORMALIZE_PARAMETERS): {DENORMALIZE_PARAMETERS}")
+if __name__ == '__main__':
+    # ====================================================================================
+    # PRINT CONFIGURATION (read from this script, not from PBS)
+    # ====================================================================================
+    print("\n" + "="*70)
+    print("MODEL ARCHITECTURE PARAMETERS")
+    print("="*70)
+    print(f"  Parameter Dimension (PARAM_DIM):        {PARAM_DIM}")
+    print(f"  Context Dimension (CONTEXT_DIM):        {CONTEXT_DIM}")
+    print(f"  Number of Flow Layers (NUM_FLOW_LAYERS): {NUM_FLOW_LAYERS}")
+    print(f"  Hidden Dimension (HIDDEN_DIM):          {HIDDEN_DIM}")
+    print(f"  Embedding Type (EMBEDDING_TYPE):        {EMBEDDING_TYPE}")
 
-print("\n" + "="*70)
-print("COMPUTED METRICS")
-print("="*70)
-estimated_batches_per_epoch = NUM_TRAINING_SAMPLES // BATCH_SIZE
-total_batches = estimated_batches_per_epoch * NUM_EPOCHS
-print(f"  Estimated Batches per Epoch:            {estimated_batches_per_epoch}")
-print(f"  Total Batch Updates:                    {total_batches}")
-print(f"  Physics Parameters:                     mass1, mass2, spin1z")
-print("="*70 + "\n")
+    print("\n" + "="*70)
+    print("TRAINING PARAMETERS")
+    print("="*70)
+    print(f"  Number of Epochs (NUM_EPOCHS):          {NUM_EPOCHS}")
+    print(f"  Batch Size (BATCH_SIZE):                {BATCH_SIZE}")
+    print(f"  Learning Rate (LEARNING_RATE):          {LEARNING_RATE}")
+    print(f"  Training Samples (NUM_TRAINING_SAMPLES): {NUM_TRAINING_SAMPLES:,}")
+    print(f"  Denormalize Output (DENORMALIZE_PARAMETERS): {DENORMALIZE_PARAMETERS}")
 
-pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params, param_norm_info, GPS_TIME_DELAY = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
+    print("\n" + "="*70)
+    print("COMPUTED METRICS")
+    print("="*70)
+    estimated_batches_per_epoch = NUM_TRAINING_SAMPLES // BATCH_SIZE
+    total_batches = estimated_batches_per_epoch * NUM_EPOCHS
+    print(f"  Estimated Batches per Epoch:            {estimated_batches_per_epoch}")
+    print(f"  Total Batch Updates:                    {total_batches}")
+    print(f"  Physics Parameters:                     mass1, mass2, spin1z")
+    print("="*70 + "\n")
 
-# Parameters are already normalized by the data generator (z-score normalization)
-print(f"Using normalized parameters from data generator")
-print(f"  Training samples: {len(pycbc_params)}")
-print(f"  Test samples: {len(pycbc_test_params)}")
-print(f"  Data dimension: {pycbc_data.shape[1]} (2 detectors concatenated)")
-print(f"  GPS time delay: {GPS_TIME_DELAY*1000:.3f} ms (will be appended after embedding)")
-print(f"  Normalization info stored for denormalization\n")     
-
-# Train DINGO model on PyCBC data
-model = DINGOModel(
-    data_dim=pycbc_data.shape[1],
-    param_dim=PARAM_DIM,
-    context_dim=CONTEXT_DIM,
-    num_flow_layers=NUM_FLOW_LAYERS,
-    hidden_dim=HIDDEN_DIM,
-    device=DEVICE,
-    embedding_type=EMBEDDING_TYPE,
-    time_delay_value=GPS_TIME_DELAY
-)
-
-losses = train_dingo_model_pycbc(
-    model, 
-    pycbc_params,  # Already normalized by data generator
-    pycbc_data, 
-    num_epochs=NUM_EPOCHS,
-    batch_size=BATCH_SIZE,
-    lr=LEARNING_RATE
-)
-
-print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-print(f"Training on {len(pycbc_data)} samples for {NUM_EPOCHS} epochs\n")
-
-
-# TESTING PYCBC DATA INFERENCE ------------------------------------------------------------------------------------------------------------------------------------------------
-# with 1000 samples
-#finds differences between inferred mean and true value for each parameter for every sample
-#------------------------------------------------------------------------------------------------------------------------------------------------
-#------------------------------------------------------------------------------------------------------------------------------------------------
-#------------------------------------------------------------------------------------------------------------------------------------------------
-#------------------------------------------------------------------------------------------------------------------------------------------------
-
-print("\n" + "=" * 80)
-print("TESTING PYCBC PARAMETER INFERENCE - 1000 SAMPLES")
-print("=" * 80)
-
-# Test on 1000 samples from the test set
-num_test_samples = min(1000, len(pycbc_test_data))
-test_indices = list(range(num_test_samples))
-
-# Collect mean differences for all samples
-param_names = ['mass1', 'mass2', 'spin1z', 'spin2z']
-mean_errors = {param: [] for param in param_names}
-mean_differences = {param: [] for param in param_names}
-
-print(f"\nInferring posteriors for {num_test_samples} test samples...")
-if DENORMALIZE_PARAMETERS:
-    print(f"Denormalizing to physical parameter space...")
-else:
-    print(f"Computing errors in NORMALIZED space (original behavior)...")
-    
-for i, test_idx in enumerate(test_indices):
-    if i % 100 == 0:
-        print(f"  Processing sample {i+1}/{num_test_samples}")
-    
-    observed_data = pycbc_test_data[test_idx].numpy()
-    true_params_normalized = pycbc_test_params[test_idx].numpy()
-    
-    # DENORMALIZATION FIX: Denormalize true parameters if enabled
-    if DENORMALIZE_PARAMETERS:
-        true_params = denormalize_params(true_params_normalized, param_norm_info, param_names)
+    if DATASET_PATH:
+        print(f"Loading pre-generated dataset from: {DATASET_PATH}")
+        _ds = DataPipeline.load_dataset(DATASET_PATH, batch_size=BATCH_SIZE)
+        # Re-extract full tensors from loaded loaders
+        def _all_tensors(loader):
+            Xs, ys = [], []
+            for b in loader:
+                Xs.append(b[0]); ys.append(b[1])
+            return torch.cat(Xs), torch.cat(ys)
+        pycbc_data,      pycbc_params      = _all_tensors(_ds["train_loader"])
+        pycbc_test_data, pycbc_test_params = _all_tensors(_ds["test_loader"])
+        param_norm_info = _ds["metadata"].get("param_norm_info", {})
+        GPS_TIME_DELAY  = _ds["metadata"].get("gps_time_delay", 0.0)
     else:
-        true_params = true_params_normalized
-    
-    # Generate posterior samples (DENORMALIZED if DENORMALIZE_PARAMETERS=True)
-    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000, 
-                                               param_norm_info=param_norm_info if DENORMALIZE_PARAMETERS else None,
-                                               param_names=param_names if DENORMALIZE_PARAMETERS else None)
-    
-    # Calculate mean differences (in PHYSICAL space if denormalized, or NORMALIZED space if not)
-    for param_idx in range(4):
-        param_samples = posterior_samples[:, param_idx]
-        true_val = true_params[param_idx]
-        inferred_mean = np.mean(param_samples)
-        error = inferred_mean - true_val  # Signed difference
-        abs_error = abs(error)
-        
-        mean_errors[param_names[param_idx]].append(abs_error)
-        mean_differences[param_names[param_idx]].append(error)
+        pycbc_data, pycbc_params, pycbc_test_data, pycbc_test_params, param_norm_info, GPS_TIME_DELAY = prepare_pycbc_data(num_samples=NUM_TRAINING_SAMPLES)
 
-print(f"\n✓ Completed inference on {num_test_samples} samples")
+    # Parameters are already normalized by the data generator (z-score normalization)
+    print(f"Using normalized parameters from data generator")
+    print(f"  Training samples: {len(pycbc_params)}")
+    print(f"  Test samples: {len(pycbc_test_params)}")
+    print(f"  Data dimension: {pycbc_data.shape[1]} (2 detectors concatenated)")
+    print(f"  GPS time delay: {GPS_TIME_DELAY*1000:.3f} ms (will be appended after embedding)")
+    print(f"  Normalization info stored for denormalization\n")     
 
-# Print summary statistics
-if DENORMALIZE_PARAMETERS:
-    print("\nParameter Inference Summary (1000 samples in PHYSICAL SPACE):")
-else:
-    print("\nParameter Inference Summary (1000 samples in NORMALIZED SPACE):")
-    
-for param_idx, param in enumerate(param_names):
-    errors = mean_errors[param]
-    diffs = mean_differences[param]
-    print(f"\n{param}:")
-    print(f"  Mean absolute error: {np.mean(errors):.4f}")
-    print(f"  Std dev of errors:   {np.std(errors):.4f}")
-    print(f"  Min error:           {np.min(errors):.4f}")
-    print(f"  Max error:           {np.max(errors):.4f}")
-    print(f"  Median error:        {np.median(errors):.4f}")
+    # Train DINGO model on PyCBC data
+    model = DINGOModel(
+        data_dim=pycbc_data.shape[1],
+        param_dim=PARAM_DIM,
+        context_dim=CONTEXT_DIM,
+        num_flow_layers=NUM_FLOW_LAYERS,
+        hidden_dim=HIDDEN_DIM,
+        device=DEVICE,
+        embedding_type=EMBEDDING_TYPE,
+        time_delay_value=GPS_TIME_DELAY
+    )
 
-# Store posterior samples for selected samples to display in additional rows
-sample_indices = [0, 250, 500, 750, 900]  # Select 5 samples to display
-sample_posteriors = {}
-if DENORMALIZE_PARAMETERS:
-    print(f"\nGenerating posterior samples for visualization (samples {sample_indices}, DENORMALIZED)...")
-else:
-    print(f"\nGenerating posterior samples for visualization (samples {sample_indices}, NORMALIZED SPACE)...")
-    
-for sample_idx in sample_indices:
-    observed_data = pycbc_test_data[sample_idx].numpy()
-    posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000,
-                                               param_norm_info=param_norm_info if DENORMALIZE_PARAMETERS else None,
-                                               param_names=param_names if DENORMALIZE_PARAMETERS else None)
-    sample_posteriors[sample_idx] = posterior_samples
-    print(f"  ✓ Generated posteriors for sample {sample_idx}")
+    losses = train_dingo_model_pycbc(
+        model, 
+        pycbc_params,  # Already normalized by data generator
+        pycbc_data, 
+        num_epochs=NUM_EPOCHS,
+        batch_size=BATCH_SIZE,
+        lr=LEARNING_RATE
+    )
 
-# Create visualization with 6 rows x 4 columns (summary + 5 sample posteriors)
-fig, axes = plt.subplots(6, 4, figsize=(20, 20))
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Training on {len(pycbc_data)} samples for {NUM_EPOCHS} epochs\n")
 
-# Prepare model information text box
-total_params = sum(p.numel() for p in model.parameters())
-model_info_text = (
-    f"Model Architecture:\n"
-    f"  Embedding: {model.embedding_type.upper()}\n"
-    f"  Flow Layers: {len(model.flow.layers)}\n"
-    f"  Input Dim (H1+L1): {pycbc_data.shape[1]}\n"
-    f"  Context Dim: {model.flow.context_dim}\n"
-    f"  Hidden Dim: {model.flow.layers[0].hidden_dim}\n"
-    f"  Total Parameters: {total_params:,}\n"
-    f"  Two-Detector Mode: H1+L1 concatenated"
-)
 
-# Add text box to the first subplot
-axes[0, 0].text(0.02, 0.98, model_info_text, transform=axes[0, 0].transAxes,
-             fontsize=9, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    # TESTING PYCBC DATA INFERENCE ------------------------------------------------------------------------------------------------------------------------------------------------
+    # with 1000 samples
+    #finds differences between inferred mean and true value for each parameter for every sample
+    #------------------------------------------------------------------------------------------------------------------------------------------------
+    #------------------------------------------------------------------------------------------------------------------------------------------------
+    #------------------------------------------------------------------------------------------------------------------------------------------------
+    #------------------------------------------------------------------------------------------------------------------------------------------------
 
-# Row 0: Summary statistics from all 1000 samples
-for param_idx, param in enumerate(param_names):
-    ax = axes[0, param_idx]
-    diffs = mean_differences[param]
-    errors = mean_errors[param]
-    
-    # Plot histogram of differences
-    ax.hist(diffs, bins=50, alpha=0.7, color='steelblue', edgecolor='black', density=False)
-    
-    # Mark zero line (perfect inference)
-    ax.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect Inference (0)')
-    
-    # Mark mean error
-    mean_diff = np.mean(diffs)
-    ax.axvline(mean_diff, color='green', linestyle='-', linewidth=2, label=f'Mean: {mean_diff:.4f}')
-    
-    # Labels and title
-    ax.set_xlabel(f'Mean Difference (Inferred - True)', fontsize=11)
-    ax.set_ylabel('Frequency', fontsize=11)
-    param_label = f'{param} (M$_\odot$)' if param_idx < 2 else f'{param}'
-    ax.set_title(f'{param_label} Inference Errors\n(1000 test samples)', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=10, loc='upper right')
-    ax.grid(True, alpha=0.3)
+    print("\n" + "=" * 80)
+    print("TESTING PYCBC PARAMETER INFERENCE - 1000 SAMPLES")
+    print("=" * 80)
 
-# Rows 1-5: Posterior samples from selected test samples
-for row_idx, sample_idx in enumerate(sample_indices):
-    posterior_samples = sample_posteriors[sample_idx]
-    true_params_normalized = pycbc_test_params[sample_idx].numpy()
-    
-    # DENORMALIZATION FIX: Denormalize true parameters if enabled for display
+    # Test on 1000 samples from the test set
+    num_test_samples = min(1000, len(pycbc_test_data))
+    test_indices = list(range(num_test_samples))
+
+    # Collect mean differences for all samples
+    param_names = ['mass1', 'mass2', 'spin1z', 'spin2z']
+    mean_errors = {param: [] for param in param_names}
+    mean_differences = {param: [] for param in param_names}
+
+    print(f"\nInferring posteriors for {num_test_samples} test samples...")
     if DENORMALIZE_PARAMETERS:
-        true_params = denormalize_params(true_params_normalized, param_norm_info, param_names)
+        print(f"Denormalizing to physical parameter space...")
     else:
-        true_params = true_params_normalized
+        print(f"Computing errors in NORMALIZED space (original behavior)...")
     
-    for param_idx in range(4):
-        ax = axes[row_idx + 1, param_idx]
-        param_samples = posterior_samples[:, param_idx]  # Already denormalized if DENORMALIZE_PARAMETERS=True
-        true_val = true_params[param_idx]
-        
-        # Plot histogram of posterior samples
-        ax.hist(param_samples, bins=50, alpha=0.7, color='darkgreen', edgecolor='black', density=True)
-        
-        # Mark true value
-        ax.axvline(true_val, color='red', linestyle='--', linewidth=2, label=f'True: {true_val:.4f}')
-        
-        # Mark mean of posterior
-        posterior_mean = np.mean(param_samples)
-        ax.axvline(posterior_mean, color='orange', linestyle='-', linewidth=2, label=f'Inferred: {posterior_mean:.4f}')
-        
-        # Labels and title
-        param_label = f'{param_names[param_idx]} (M$_\odot$)' if param_idx < 2 else f'{param_names[param_idx]}'
+    for i, test_idx in enumerate(test_indices):
+        if i % 100 == 0:
+            print(f"  Processing sample {i+1}/{num_test_samples}")
+    
+        observed_data = pycbc_test_data[test_idx].numpy()
+        true_params_normalized = pycbc_test_params[test_idx].numpy()
+    
+        # DENORMALIZATION FIX: Denormalize true parameters if enabled
         if DENORMALIZE_PARAMETERS:
-            ax.set_xlabel(f'{param_label} Value (physical space)', fontsize=11)
+            true_params = denormalize_params(true_params_normalized, param_norm_info, param_names)
         else:
-            ax.set_xlabel(f'{param_label} Value (normalized space)', fontsize=11)
-        ax.set_ylabel('Density', fontsize=11)
-        ax.set_title(f'{param_label} Posterior (Sample {sample_idx})', fontsize=12, fontweight='bold')
+            true_params = true_params_normalized
+    
+        # Generate posterior samples (DENORMALIZED if DENORMALIZE_PARAMETERS=True)
+        posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000, 
+                                                   param_norm_info=param_norm_info if DENORMALIZE_PARAMETERS else None,
+                                                   param_names=param_names if DENORMALIZE_PARAMETERS else None)
+    
+        # Calculate mean differences (in PHYSICAL space if denormalized, or NORMALIZED space if not)
+        for param_idx in range(4):
+            param_samples = posterior_samples[:, param_idx]
+            true_val = true_params[param_idx]
+            inferred_mean = np.mean(param_samples)
+            error = inferred_mean - true_val  # Signed difference
+            abs_error = abs(error)
+        
+            mean_errors[param_names[param_idx]].append(abs_error)
+            mean_differences[param_names[param_idx]].append(error)
+
+    print(f"\n✓ Completed inference on {num_test_samples} samples")
+
+    # Print summary statistics
+    if DENORMALIZE_PARAMETERS:
+        print("\nParameter Inference Summary (1000 samples in PHYSICAL SPACE):")
+    else:
+        print("\nParameter Inference Summary (1000 samples in NORMALIZED SPACE):")
+    
+    for param_idx, param in enumerate(param_names):
+        errors = mean_errors[param]
+        diffs = mean_differences[param]
+        print(f"\n{param}:")
+        print(f"  Mean absolute error: {np.mean(errors):.4f}")
+        print(f"  Std dev of errors:   {np.std(errors):.4f}")
+        print(f"  Min error:           {np.min(errors):.4f}")
+        print(f"  Max error:           {np.max(errors):.4f}")
+        print(f"  Median error:        {np.median(errors):.4f}")
+
+    # Store posterior samples for selected samples to display in additional rows
+    sample_indices = [0, 250, 500, 750, 900]  # Select 5 samples to display
+    sample_posteriors = {}
+    if DENORMALIZE_PARAMETERS:
+        print(f"\nGenerating posterior samples for visualization (samples {sample_indices}, DENORMALIZED)...")
+    else:
+        print(f"\nGenerating posterior samples for visualization (samples {sample_indices}, NORMALIZED SPACE)...")
+    
+    for sample_idx in sample_indices:
+        observed_data = pycbc_test_data[sample_idx].numpy()
+        posterior_samples, stats = infer_with_dingo(model, observed_data, num_samples=10000,
+                                                   param_norm_info=param_norm_info if DENORMALIZE_PARAMETERS else None,
+                                                   param_names=param_names if DENORMALIZE_PARAMETERS else None)
+        sample_posteriors[sample_idx] = posterior_samples
+        print(f"  ✓ Generated posteriors for sample {sample_idx}")
+
+    # Create visualization with 6 rows x 4 columns (summary + 5 sample posteriors)
+    fig, axes = plt.subplots(6, 4, figsize=(20, 20))
+
+    # Prepare model information text box
+    total_params = sum(p.numel() for p in model.parameters())
+    model_info_text = (
+        f"Model Architecture:\n"
+        f"  Embedding: {model.embedding_type.upper()}\n"
+        f"  Flow Layers: {len(model.flow.layers)}\n"
+        f"  Input Dim (H1+L1): {pycbc_data.shape[1]}\n"
+        f"  Context Dim: {model.flow.context_dim}\n"
+        f"  Hidden Dim: {model.flow.layers[0].hidden_dim}\n"
+        f"  Total Parameters: {total_params:,}\n"
+        f"  Two-Detector Mode: H1+L1 concatenated"
+    )
+
+    # Add text box to the first subplot
+    axes[0, 0].text(0.02, 0.98, model_info_text, transform=axes[0, 0].transAxes,
+                 fontsize=9, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    # Row 0: Summary statistics from all 1000 samples
+    for param_idx, param in enumerate(param_names):
+        ax = axes[0, param_idx]
+        diffs = mean_differences[param]
+        errors = mean_errors[param]
+    
+        # Plot histogram of differences
+        ax.hist(diffs, bins=50, alpha=0.7, color='steelblue', edgecolor='black', density=False)
+    
+        # Mark zero line (perfect inference)
+        ax.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect Inference (0)')
+    
+        # Mark mean error
+        mean_diff = np.mean(diffs)
+        ax.axvline(mean_diff, color='green', linestyle='-', linewidth=2, label=f'Mean: {mean_diff:.4f}')
+    
+        # Labels and title
+        ax.set_xlabel(f'Mean Difference (Inferred - True)', fontsize=11)
+        ax.set_ylabel('Frequency', fontsize=11)
+        param_label = f'{param} (M$_\odot$)' if param_idx < 2 else f'{param}'
+        ax.set_title(f'{param_label} Inference Errors\n(1000 test samples)', fontsize=12, fontweight='bold')
         ax.legend(fontsize=10, loc='upper right')
         ax.grid(True, alpha=0.3)
 
-# Create Plots directory if it doesn't exist
-import os
-from datetime import datetime
-os.makedirs("Plots", exist_ok=True)
+    # Rows 1-5: Posterior samples from selected test samples
+    for row_idx, sample_idx in enumerate(sample_indices):
+        posterior_samples = sample_posteriors[sample_idx]
+        true_params_normalized = pycbc_test_params[sample_idx].numpy()
+    
+        # DENORMALIZATION FIX: Denormalize true parameters if enabled for display
+        if DENORMALIZE_PARAMETERS:
+            true_params = denormalize_params(true_params_normalized, param_norm_info, param_names)
+        else:
+            true_params = true_params_normalized
+    
+        for param_idx in range(4):
+            ax = axes[row_idx + 1, param_idx]
+            param_samples = posterior_samples[:, param_idx]  # Already denormalized if DENORMALIZE_PARAMETERS=True
+            true_val = true_params[param_idx]
+        
+            # Plot histogram of posterior samples
+            ax.hist(param_samples, bins=50, alpha=0.7, color='darkgreen', edgecolor='black', density=True)
+        
+            # Mark true value
+            ax.axvline(true_val, color='red', linestyle='--', linewidth=2, label=f'True: {true_val:.4f}')
+        
+            # Mark mean of posterior
+            posterior_mean = np.mean(param_samples)
+            ax.axvline(posterior_mean, color='orange', linestyle='-', linewidth=2, label=f'Inferred: {posterior_mean:.4f}')
+        
+            # Labels and title
+            param_label = f'{param_names[param_idx]} (M$_\odot$)' if param_idx < 2 else f'{param_names[param_idx]}'
+            if DENORMALIZE_PARAMETERS:
+                ax.set_xlabel(f'{param_label} Value (physical space)', fontsize=11)
+            else:
+                ax.set_xlabel(f'{param_label} Value (normalized space)', fontsize=11)
+            ax.set_ylabel('Density', fontsize=11)
+            ax.set_title(f'{param_label} Posterior (Sample {sample_idx})', fontsize=12, fontweight='bold')
+            ax.legend(fontsize=10, loc='upper right')
+            ax.grid(True, alpha=0.3)
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-plot_filename = f"Plots/PyCBC_Parameter_Inference_TwoDetector_{timestamp}.png"
+    # Create Plots directory if it doesn't exist
+    import os
+    from datetime import datetime
+    os.makedirs("Plots", exist_ok=True)
 
-try:
-    plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
-    print(f"\n✓ Plot saved to: {plot_filename}")
-except Exception as e:
-    print(f"\n✗ Failed to save plot: {e}")
-    import traceback
-    traceback.print_exc()
-print("=" * 80)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_filename = f"Plots/PyCBC_Parameter_Inference_TwoDetector_{timestamp}.png"
+
+    try:
+        plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+        print(f"\n✓ Plot saved to: {plot_filename}")
+    except Exception as e:
+        print(f"\n✗ Failed to save plot: {e}")
+        import traceback
+        traceback.print_exc()
+    print("=" * 80)
