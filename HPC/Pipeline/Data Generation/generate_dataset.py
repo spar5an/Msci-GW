@@ -43,6 +43,14 @@ NOISE_BACKEND = 'aligo'
 # next to gw_datagen.py: <Data Generation>/o4_psd_cache/
 PSD_CACHE_DIR = None
 
+# Graviton mass bounds for uniform m_g sampling (kg).
+# lambda_g is derived per waveform via lambda_g = h / (m_g * c).
+# M_G_MIN = 2.21e-58 kg  ↔  lambda_g_max ≈ 1e16 m   (weak modification)
+# M_G_MAX = 2.21e-56 kg  ↔  lambda_g_min ≈ 1e14 m   (strong modification)
+_H_OVER_C = 6.626e-34 / 2.998e8   # h/c in kg·m — conversion factor m_g → lambda_g
+M_G_MIN = 2.21e-58   # kg
+M_G_MAX = 2.21e-56   # kg
+
 # Parameter distributions — add/remove keys to change what is sampled.
 # Each value must be a function of (size,) returning a numpy array.
 CONFIG = {
@@ -57,6 +65,8 @@ CONFIG = {
     'dec':         lambda size: np.arcsin(np.random.uniform(-1, 1, size=size)),
     'polarization':lambda size: np.random.uniform(0, np.pi, size=size),
     'redshift':    lambda size: np.random.uniform(0.01, 0.5, size=size),
+    # Uniform sampling in graviton mass m_g (kg), converted to Compton wavelength lambda_g (m)
+    'lambda_g':    lambda size: _H_OVER_C / np.random.uniform(M_G_MIN, M_G_MAX, size=size),
 }
 
 # ── Waveform settings ────────────────────────────────────────────────────────
@@ -67,8 +77,10 @@ F_FINAL         = 2048.0     # Hz
 APPROXIMANT     = 'IMRPhenomD'
 
 # ── MG / LV parameters (used only for 'mg', 'lv', 'mg_real_psd') ────────────
-# Set LAMBDA_G = None to sample per-waveform from CONFIG (add 'lambda_g' key)
-LAMBDA_G = 1e15   # graviton Compton wavelength in metres
+# LAMBDA_G = None uses per-waveform lambda_g values from the CONFIG 'lambda_g' entry above
+# (uniform m_g sampling converted to Compton wavelength).
+# Set to a fixed float (metres) to override all per-waveform sampling.
+LAMBDA_G = None
 
 # LV parameters (used only for MODE = 'lv')
 ALPHA_LV = 3.0    # dispersion exponent (e.g. 3 = doubly special relativity)

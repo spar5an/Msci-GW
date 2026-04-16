@@ -6,13 +6,11 @@ Fixtures
 small_config    : minimal BBH parameter config (all lambdas, session-scoped)
 base_kwargs     : fast generation kwargs shared by both test files
 aligo_kwargs    : base_kwargs + f_final=2048.0 (for standard generators only)
-psd_csv_path    : path to a synthetic aLIGO PSD CSV (session-scoped)
 """
 
 import os
 import sys
 import numpy as np
-import pandas as pd
 import pytest
 from pathlib import Path
 
@@ -59,7 +57,7 @@ def small_config():
 
 # ---------------------------------------------------------------------------
 # base_kwargs — shared generation settings optimised for test speed.
-# num_workers=0 avoids multiprocessing deadlocks inside pytest on WSL2/Linux.
+# num_workers=1 avoids multiprocessing deadlocks inside pytest on WSL2/Linux.
 # f_final is NOT included here because pycbc_data_generator_real_psd
 # does not accept it; aligo_kwargs below adds it for the standard generators.
 # ---------------------------------------------------------------------------
@@ -75,7 +73,7 @@ def base_kwargs():
         train_split=0.7,
         val_split=0.15,
         add_noise=True,
-        num_workers=0,
+        num_workers=1,
         show_progress=False,
     )
 
@@ -84,55 +82,6 @@ def base_kwargs():
 def aligo_kwargs(base_kwargs):
     """base_kwargs extended with f_final for the standard (aLIGO) generators."""
     return {**base_kwargs, "f_final": 2048.0}
-
-
-# ---------------------------------------------------------------------------
-# psd_csv_path — build a synthetic PSD CSV once per test session.
-# Uses aLIGOZeroDetHighPower from PyCBC so values are physically realistic.
-# delta_f=0.125 Hz gives 8× oversampling relative to the generator's 0.5 Hz
-# grid (signal_length=2.0 → delta_f_gen = 1/2 = 0.5 Hz), which means the
-# interpolation step inside the generators has plenty of anchor points.
-# ---------------------------------------------------------------------------
-@pytest.fixture(scope="session")
-def psd_csv_path(tmp_path_factory):
-    from pycbc.psd import aLIGOZeroDetHighPower
-
-    tmp_dir = tmp_path_factory.mktemp("psd_data")
-    csv_path = tmp_dir / "test_psds.csv"
-
-    # Frequency grid: 0 .. 2048 Hz at 0.125 Hz resolution
-    delta_f = 0.125
-    f_max = 2048.0
-    flow = 20.0  # below f_lower=40 used in generators (safer for interpolation)
-    flen = int(f_max / delta_f) + 1
-
-    psd_series = aLIGOZeroDetHighPower(flen, delta_f, flow)
-    psd_vals = psd_series.numpy()  # use .numpy() — np.array() triggers numpy 2.0 deprecation on PyCBC objects
-    freqs = np.arange(flen) * delta_f
-
-    # Replace any zero / inf entries outside the sensitive band with a small
-    # but finite floor so the interpolator doesn't produce degenerate values.
-    floor = np.nanmin(psd_vals[psd_vals > 0]) if np.any(psd_vals > 0) else 1e-46
-    psd_vals = np.where(np.isfinite(psd_vals) & (psd_vals > 0), psd_vals, floor)
-
-    rows = []
-    for event_idx, event_name in enumerate(["mock_event_1", "mock_event_2"]):
-        for det in ("H1", "L1"):
-            for f, p in zip(freqs, psd_vals):
-                rows.append(
-                    {
-                        "event_rank":  event_idx + 1,
-                        "event_name":  event_name,
-                        "gps":         1369166418 + event_idx * 1000,
-                        "detector":    det,
-                        "frequency":   f,
-                        "psd":         p,
-                    }
-                )
-
-    df = pd.DataFrame(rows)
-    df.to_csv(str(csv_path), index=False)
-    return str(csv_path)
 
 
 # ---------------------------------------------------------------------------

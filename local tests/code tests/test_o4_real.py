@@ -4,7 +4,8 @@ test_o4_real.py — Batch 2: real O4 GWOSC PSDs.
 Covers:
   - Loading and interpolating a pre-downloaded cached PSD
   - Generating noise from a cached PSD
-  - End-to-end: pycbc_data_generator with noise_backend='o4_psd'
+  - End-to-end: GR, MG, and LV generators with noise_backend='o4_psd'
+  - Save / load round-trip for all three generators
 
 Requires a pre-populated O4 PSD cache (no internet access during tests).
 To populate the cache, run once from the Data Generation directory:
@@ -24,10 +25,18 @@ import torch
 from gw_datagen import (
     load_random_o4_psd,
     pycbc_data_generator,
+    pycbc_massive_gravity_data_generator,
+    pycbc_lorentz_violation_data_generator,
+    save_dataloaders,
+    load_dataloaders,
     _cache_path,
 )
 from pycbc.noise import noise_from_psd
 from conftest import PLOTS_DIR
+
+LAMBDA_G    = 1e22
+ALPHA_LV    = 3.0
+A_LV        = 1e15
 
 DETECTOR    = "H1"
 SAMPLE_RATE = 4096
@@ -40,7 +49,7 @@ FLEN        = TARGET_LEN // 2 + 1              # 4097
 
 
 # ---------------------------------------------------------------------------
-# Session fixture — generate one GR dataset with o4_psd noise
+# Session fixtures — one dataset per generator with o4_psd noise
 # Uses only H1 to match the single-detector psd_cache_dir fixture
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
@@ -52,6 +61,48 @@ def gr_o4(small_config, aligo_kwargs, psd_cache_dir):
         psd_cache_dir=psd_cache_dir,
         **aligo_kwargs,
     )
+
+@pytest.fixture(scope="session")
+def mg_o4(small_config, aligo_kwargs, psd_cache_dir):
+    return pycbc_massive_gravity_data_generator(
+        config=small_config,
+        lambda_g=LAMBDA_G,
+        detectors=["H1"],
+        noise_backend="o4_psd",
+        psd_cache_dir=psd_cache_dir,
+        **aligo_kwargs,
+    )
+
+@pytest.fixture(scope="session")
+def lv_o4(small_config, aligo_kwargs, psd_cache_dir):
+    return pycbc_lorentz_violation_data_generator(
+        config=small_config,
+        alpha_lv=ALPHA_LV,
+        A_lv=A_LV,
+        lambda_g=LAMBDA_G,
+        detectors=["H1"],
+        noise_backend="o4_psd",
+        psd_cache_dir=psd_cache_dir,
+        **aligo_kwargs,
+    )
+
+@pytest.fixture(scope="session")
+def saved_path_gr(gr_o4, tmp_path_factory):
+    path = str(tmp_path_factory.mktemp("saveload") / "gr_o4.pt")
+    save_dataloaders(gr_o4, path)
+    return path
+
+@pytest.fixture(scope="session")
+def saved_path_mg(mg_o4, tmp_path_factory):
+    path = str(tmp_path_factory.mktemp("saveload") / "mg_o4.pt")
+    save_dataloaders(mg_o4, path)
+    return path
+
+@pytest.fixture(scope="session")
+def saved_path_lv(lv_o4, tmp_path_factory):
+    path = str(tmp_path_factory.mktemp("saveload") / "lv_o4.pt")
+    save_dataloaders(lv_o4, path)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +193,69 @@ class TestNoise:
 
 
 # ---------------------------------------------------------------------------
-# TestGeneratorEndToEnd — pycbc_data_generator with o4_psd backend
+# TestSaveLoad — round-trip for all three o4_psd generators
+# ---------------------------------------------------------------------------
+class TestSaveLoad:
+    def test_gr_file_exists(self, saved_path_gr):
+        assert os.path.isfile(saved_path_gr)
+
+    def test_gr_keys_survive(self, saved_path_gr):
+        loaded = load_dataloaders(saved_path_gr)
+        assert set(loaded.keys()) == {"train_loader", "val_loader", "test_loader", "metadata"}
+
+    def test_gr_metadata_survives(self, saved_path_gr, gr_o4):
+        loaded = load_dataloaders(saved_path_gr)
+        for key in ("num_samples", "waveform_shape", "channels",
+                    "train_size", "val_size", "test_size", "time_resolution"):
+            assert loaded["metadata"][key] == gr_o4["metadata"][key]
+
+    def test_gr_tensor_exact_roundtrip(self, saved_path_gr, gr_o4):
+        loaded = load_dataloaders(saved_path_gr)
+        orig     = gr_o4["train_loader"].dataset.dataset.tensors[0]
+        reloaded = loaded["train_loader"].dataset.dataset.tensors[0]
+        assert torch.equal(orig, reloaded)
+
+    def test_mg_file_exists(self, saved_path_mg):
+        assert os.path.isfile(saved_path_mg)
+
+    def test_mg_keys_survive(self, saved_path_mg):
+        loaded = load_dataloaders(saved_path_mg)
+        assert set(loaded.keys()) == {"train_loader", "val_loader", "test_loader", "metadata"}
+
+    def test_mg_metadata_survives(self, saved_path_mg, mg_o4):
+        loaded = load_dataloaders(saved_path_mg)
+        for key in ("num_samples", "waveform_shape", "channels",
+                    "train_size", "val_size", "test_size", "time_resolution"):
+            assert loaded["metadata"][key] == mg_o4["metadata"][key]
+
+    def test_mg_tensor_exact_roundtrip(self, saved_path_mg, mg_o4):
+        loaded = load_dataloaders(saved_path_mg)
+        orig     = mg_o4["train_loader"].dataset.dataset.tensors[0]
+        reloaded = loaded["train_loader"].dataset.dataset.tensors[0]
+        assert torch.equal(orig, reloaded)
+
+    def test_lv_file_exists(self, saved_path_lv):
+        assert os.path.isfile(saved_path_lv)
+
+    def test_lv_keys_survive(self, saved_path_lv):
+        loaded = load_dataloaders(saved_path_lv)
+        assert set(loaded.keys()) == {"train_loader", "val_loader", "test_loader", "metadata"}
+
+    def test_lv_metadata_survives(self, saved_path_lv, lv_o4):
+        loaded = load_dataloaders(saved_path_lv)
+        for key in ("num_samples", "waveform_shape", "channels",
+                    "train_size", "val_size", "test_size", "time_resolution"):
+            assert loaded["metadata"][key] == lv_o4["metadata"][key]
+
+    def test_lv_tensor_exact_roundtrip(self, saved_path_lv, lv_o4):
+        loaded = load_dataloaders(saved_path_lv)
+        orig     = lv_o4["train_loader"].dataset.dataset.tensors[0]
+        reloaded = loaded["train_loader"].dataset.dataset.tensors[0]
+        assert torch.equal(orig, reloaded)
+
+
+# ---------------------------------------------------------------------------
+# TestGeneratorEndToEnd — all three generators with o4_psd backend
 # ---------------------------------------------------------------------------
 class TestGeneratorEndToEnd:
     def test_gr_o4_finite_and_nonzero(self, gr_o4):
@@ -151,29 +264,49 @@ class TestGeneratorEndToEnd:
         X, _ = _first_batch(gr_o4["train_loader"])
         assert X.abs().sum().item() > 0
 
+    def test_mg_o4_finite_and_nonzero(self, mg_o4):
+        for X, _ in mg_o4["train_loader"]:
+            assert torch.isfinite(X).all()
+        X, _ = _first_batch(mg_o4["train_loader"])
+        assert X.abs().sum().item() > 0
+
+    def test_lv_o4_finite_and_nonzero(self, lv_o4):
+        for X, _ in lv_o4["train_loader"]:
+            assert torch.isfinite(X).all()
+        X, _ = _first_batch(lv_o4["train_loader"])
+        assert X.abs().sum().item() > 0
+
 
 # ---------------------------------------------------------------------------
 # TestPlots — diagnostic plots, no content assertions
 # ---------------------------------------------------------------------------
 class TestPlots:
-    def test_plot_gr_o4_waveform(self, gr_o4):
+    def test_plot_o4_waveforms(self, gr_o4, mg_o4, lv_o4):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        meta = gr_o4["metadata"]
-        t    = np.arange(meta["waveform_shape"][1]) * meta["time_resolution"]
-        X, _ = _first_batch(gr_o4["train_loader"])
+        datasets = [
+            (gr_o4, "GR — O4 noise",              "steelblue"),
+            (mg_o4, f"MG (λ_g={LAMBDA_G:.0e} m)", "tomato"),
+            (lv_o4, f"LV (α={ALPHA_LV})",         "mediumseagreen"),
+        ]
 
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(t, X[0, 0].numpy(), lw=0.5, color="#d62728")
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Strain (H1)")
-        ax.set_title("GR waveform — O4 real PSD noise (H1)")
-        ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        fig.suptitle("O4 real PSD noise — generator comparison (H1 strain, first sample)")
+
+        for ax, (result, title, color) in zip(axes, datasets):
+            meta = result["metadata"]
+            t    = np.arange(meta["waveform_shape"][1]) * meta["time_resolution"]
+            X, _ = _first_batch(result["train_loader"])
+            ax.plot(t, X[0, 0].numpy(), lw=0.5, color=color)
+            ax.set_title(title, fontsize=10)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Strain (H1)")
+            ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+
         fig.tight_layout()
-
         os.makedirs(PLOTS_DIR, exist_ok=True)
-        fig.savefig(os.path.join(PLOTS_DIR, "o4_real_gr_waveform.png"),
+        fig.savefig(os.path.join(PLOTS_DIR, "o4_real_waveforms.png"),
                     dpi=100, bbox_inches="tight")
         plt.close(fig)

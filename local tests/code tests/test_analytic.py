@@ -5,8 +5,6 @@ Covers:
   - pycbc_data_generator            (GR,  aLIGO noise)
   - pycbc_massive_gravity_data_generator  (MG,  aLIGO noise)
   - pycbc_lorentz_violation_data_generator (LV, aLIGO noise)
-  - pycbc_data_generator_real_psd   (GR,  synthetic aLIGO CSV)
-  - pycbc_modified_data_generator_real_psd (MG, synthetic aLIGO CSV)
   - save / load round-trip
   - diagnostic plots → plots/
 
@@ -25,8 +23,6 @@ from gw_datagen import (
     pycbc_data_generator,
     pycbc_massive_gravity_data_generator,
     pycbc_lorentz_violation_data_generator,
-    pycbc_data_generator_real_psd,
-    pycbc_modified_data_generator_real_psd,
     save_dataloaders,
     load_dataloaders,
 )
@@ -55,17 +51,6 @@ def lv(small_config, aligo_kwargs):
     return pycbc_lorentz_violation_data_generator(
         config=small_config, alpha_lv=ALPHA_LV, A_lv=A_LV, lambda_g=LAMBDA_G,
         **aligo_kwargs)
-
-@pytest.fixture(scope="session")
-def gr_csv(small_config, base_kwargs, psd_csv_path):
-    return pycbc_data_generator_real_psd(
-        config=small_config, psd_csv=psd_csv_path, **base_kwargs)
-
-@pytest.fixture(scope="session")
-def mg_csv(small_config, base_kwargs, psd_csv_path):
-    return pycbc_modified_data_generator_real_psd(
-        config=small_config, psd_csv=psd_csv_path, lambda_g=LAMBDA_G,
-        f_final=2048.0, **base_kwargs)
 
 @pytest.fixture(scope="session")
 def saved_path(gr, tmp_path_factory):
@@ -130,17 +115,6 @@ class TestGenerators:
         X, _ = _first_batch(lv["train_loader"])
         assert X.abs().sum().item() > 0
 
-    # Real-PSD CSV generators
-    def test_gr_csv_finite_and_nonzero(self, gr_csv):
-        assert _all_finite(gr_csv["train_loader"])
-        X, _ = _first_batch(gr_csv["train_loader"])
-        assert X.abs().sum().item() > 0
-
-    def test_mg_csv_finite_and_nonzero(self, mg_csv):
-        assert _all_finite(mg_csv["train_loader"])
-        X, _ = _first_batch(mg_csv["train_loader"])
-        assert X.abs().sum().item() > 0
-
 
 # ---------------------------------------------------------------------------
 # TestSaveLoad — round-trip using torch.equal (exact, not allclose)
@@ -171,19 +145,18 @@ class TestSaveLoad:
 # TestPlots — diagnostic plots, no content assertions
 # ---------------------------------------------------------------------------
 class TestPlots:
-    def test_plot_all_generators(self, gr, mg, lv, gr_csv):
+    def test_plot_all_generators(self, gr, mg, lv):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         fig.suptitle("Analytic PSD — generator comparison (H1 strain, first sample)")
 
         datasets = [
-            (gr,     "GR — aLIGO noise",      "steelblue"),
-            (mg,     f"MG (λ_g={LAMBDA_G:.0e} m)", "tomato"),
-            (lv,     f"LV (α={ALPHA_LV})",    "mediumseagreen"),
-            (gr_csv, "GR — real PSD CSV",      "darkorchid"),
+            (gr, "GR — aLIGO noise",          "steelblue"),
+            (mg, f"MG (λ_g={LAMBDA_G:.0e} m)", "tomato"),
+            (lv, f"LV (α={ALPHA_LV})",         "mediumseagreen"),
         ]
 
         for ax, (result, title, color) in zip(axes.flat, datasets):
