@@ -34,8 +34,14 @@ OUTPUT_PATH   = 'dataset.pt'
 ADD_NOISE     = True
 NUM_WORKERS   = 4
 # Noise backend: 'aligo' uses the fast analytical aLIGO PSD (no network access required).
-#                'o4_psd' uses real O4 PSD data cached from GWOSC (slower, requires internet).
+#                'o4_psd' uses real O4 PSD data sampled from locally saved .npz files.
+#                Run download_o4_psds.py once (on a login node) to populate PSD_CACHE_DIR.
 NOISE_BACKEND = 'aligo'
+
+# Directory containing pre-downloaded O4 PSD cache files (produced by download_o4_psds.py).
+# Only used when NOISE_BACKEND = 'o4_psd'.  None uses the fixed default location
+# next to gw_datagen.py: <Data Generation>/o4_psd_cache/
+PSD_CACHE_DIR = None
 
 # Parameter distributions — add/remove keys to change what is sampled.
 # Each value must be a function of (size,) returning a numpy array.
@@ -93,10 +99,13 @@ if __name__ == '__main__':
         num_workers=NUM_WORKERS,
     )
 
+    _cache_kwargs = {'psd_cache_dir': PSD_CACHE_DIR} if PSD_CACHE_DIR is not None else {}
+
     if MODE == 'gr':
         result = pycbc_data_generator(
             f_final=F_FINAL,
             noise_backend=NOISE_BACKEND,
+            **_cache_kwargs,
             **common_kwargs,
         )
 
@@ -105,6 +114,7 @@ if __name__ == '__main__':
             lambda_g=LAMBDA_G,
             f_final=F_FINAL,
             noise_backend=NOISE_BACKEND,
+            **_cache_kwargs,
             **common_kwargs,
         )
 
@@ -115,6 +125,7 @@ if __name__ == '__main__':
             lambda_g=LAMBDA_G,
             f_final=F_FINAL,
             noise_backend=NOISE_BACKEND,
+            **_cache_kwargs,
             **common_kwargs,
         )
 

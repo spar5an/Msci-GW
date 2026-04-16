@@ -8,3 +8,4 @@ CLAUDE.md
 *.pt
 HPC/test7_o4_whitened_all.csv
 HPC/test7_o4_psds_all.csv
+*.npz

@@ -107,7 +107,7 @@ def psd_csv_path(tmp_path_factory):
     flen = int(f_max / delta_f) + 1
 
     psd_series = aLIGOZeroDetHighPower(flen, delta_f, flow)
-    psd_vals = np.array(psd_series)
+    psd_vals = psd_series.numpy()  # use .numpy() — np.array() triggers numpy 2.0 deprecation on PyCBC objects
     freqs = np.arange(flen) * delta_f
 
     # Replace any zero / inf entries outside the sensitive band with a small
@@ -133,3 +133,25 @@ def psd_csv_path(tmp_path_factory):
     df = pd.DataFrame(rows)
     df.to_csv(str(csv_path), index=False)
     return str(csv_path)
+
+
+# ---------------------------------------------------------------------------
+# psd_cache_dir — points at the fixed o4_psd_cache/ folder next to gw_datagen.py.
+# Tests that use this fixture are skipped if the cache has not been populated.
+# To populate it, run:
+#   python download_o4_psds.py --detectors H1 L1 --n-segments 100
+# from the Data Generation directory (requires internet access).
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def psd_cache_dir():
+    """Return the fixed O4 PSD cache directory; skip if it doesn't contain H1 data."""
+    from gw_datagen import _DEFAULT_CACHE, _cache_path
+
+    cache_dir = _DEFAULT_CACHE
+    h1_cache = _cache_path("H1", 4096, cache_dir)
+    if not os.path.isfile(h1_cache):
+        pytest.skip(
+            f"O4 PSD cache not found at {h1_cache}. "
+            "Run download_o4_psds.py to populate it."
+        )
+    return cache_dir

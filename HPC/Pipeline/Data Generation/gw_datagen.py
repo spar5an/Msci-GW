@@ -40,7 +40,7 @@ _O4A_GPS_END    = 1389744018
 _FETCH_DUR      = 256   # seconds of data per segment
 _FFT_LEN        = 4     # Welch FFT length in seconds
 _DEFAULT_N_SEGS = 100
-_DEFAULT_CACHE  = os.path.join(os.path.expanduser('~'), '.cache', 'gw_datagen')
+_DEFAULT_CACHE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'o4_psd_cache')
 
 
 def _cache_path(detector: str, sample_rate: int, cache_dir: str) -> str:
@@ -503,6 +503,7 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
                                   alpha_lv: float, A_lv: float,
                                   f_final: float,
                                   noise_backend: str = 'aligo',
+                                  psd_cache_dir: str = _DEFAULT_CACHE,
                                   highpass_fc: float = _HIGHPASS_FC) -> dict:
     """
     Worker function to generate a single Lorentz-violating (LV) GW waveform.
@@ -643,7 +644,7 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
                 if noise_backend == 'aligo':
                     psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
                 else:
-                    psd = load_random_o4_psd(flen, delta_f_noise, f_lower, det_name, int(round(1.0 / delta_t)))
+                    psd = load_random_o4_psd(flen, delta_f_noise, f_lower, det_name, int(round(1.0 / delta_t)), cache_dir=psd_cache_dir)
                 noise = noise_from_psd(target_length, delta_t, psd)
                 noise._epoch = signal._epoch
                 detector_signals[det_name] = signal.inject(noise)
@@ -1073,6 +1074,7 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
                               f_lower: float, detectors: List[str], target_length: int,
                               add_noise: bool = True, f_final: float = 2048.0,
                               noise_backend: str = 'aligo',
+                              psd_cache_dir: str = _DEFAULT_CACHE,
                               highpass_fc: float = _HIGHPASS_FC) -> Dict:
     """Worker function to generate a single waveform and project to detectors at fixed length.
 
@@ -1160,7 +1162,7 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
                 if noise_backend == 'aligo':
                     psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
                 else:
-                    psd = load_random_o4_psd(flen, delta_f, f_lower, det_name, int(round(1.0 / delta_t)))
+                    psd = load_random_o4_psd(flen, delta_f, f_lower, det_name, int(round(1.0 / delta_t)), cache_dir=psd_cache_dir)
                 noise = noise_from_psd(target_length, delta_t, psd)
                 noise._epoch = signal._epoch
                 detector_signals[det_name] = signal.inject(noise)
@@ -1188,6 +1190,7 @@ def _generate_waveforms_parallel(param_dicts: List[Dict],
                                 add_noise: bool,
                                 f_final: float = 2048.0,
                                 noise_backend: str = 'aligo',
+                                psd_cache_dir: str = _DEFAULT_CACHE,
                                 highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
     """Generate waveforms in parallel using multiprocessing."""
     worker_func = partial(_generate_single_waveform,
@@ -1199,6 +1202,7 @@ def _generate_waveforms_parallel(param_dicts: List[Dict],
                           add_noise=add_noise,
                           f_final=f_final,
                           noise_backend=noise_backend,
+                          psd_cache_dir=psd_cache_dir,
                           highpass_fc=highpass_fc)
 
     if num_workers == 1:
@@ -1229,6 +1233,7 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
                                         add_noise: bool, lambda_g: float,
                                         f_final: float,
                                         noise_backend: str = 'aligo',
+                                        psd_cache_dir: str = _DEFAULT_CACHE,
                                         highpass_fc: float = _HIGHPASS_FC) -> Dict:
     """
     Worker function to generate a single modified (massive graviton) waveform.
@@ -1353,7 +1358,7 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
                 if noise_backend == 'aligo':
                     psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
                 else:
-                    psd = load_random_o4_psd(flen, delta_f_noise, f_lower, det_name, int(round(1.0 / delta_t)))
+                    psd = load_random_o4_psd(flen, delta_f_noise, f_lower, det_name, int(round(1.0 / delta_t)), cache_dir=psd_cache_dir)
                 noise = noise_from_psd(target_length, delta_t, psd)
                 noise._epoch = signal._epoch
                 detector_signals[det_name] = signal.inject(noise)
@@ -1380,6 +1385,7 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
                                            lambda_g: float,
                                            f_final: float,
                                            noise_backend: str = 'aligo',
+                                           psd_cache_dir: str = _DEFAULT_CACHE,
                                            highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
     """Generate modified waveforms in parallel using multiprocessing."""
     worker_func = partial(
@@ -1393,6 +1399,7 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
         lambda_g=lambda_g,
         f_final=f_final,
         noise_backend=noise_backend,
+        psd_cache_dir=psd_cache_dir,
         highpass_fc=highpass_fc,
     )
 
@@ -1430,6 +1437,7 @@ def _generate_lv_waveforms_parallel(param_dicts: List[Dict],
                                      A_lv: float,
                                      f_final: float,
                                      noise_backend: str = 'aligo',
+                                     psd_cache_dir: str = _DEFAULT_CACHE,
                                      highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
     """Generate Lorentz-violating waveforms in parallel using multiprocessing."""
     worker_func = partial(
@@ -1445,6 +1453,7 @@ def _generate_lv_waveforms_parallel(param_dicts: List[Dict],
         A_lv=A_lv,
         f_final=f_final,
         noise_backend=noise_backend,
+        psd_cache_dir=psd_cache_dir,
         highpass_fc=highpass_fc,
     )
 
@@ -1486,7 +1495,8 @@ def pycbc_data_generator(config: Dict[str, Callable],
                         show_progress: bool = True,
                         detectors: List[str] = None,
                         add_noise: bool = True,
-                        noise_backend: str = 'aligo') -> Dict:
+                        noise_backend: str = 'aligo',
+                        psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Generate PyCBC waveforms projected to detectors.
     Returns PyTorch DataLoaders for training, validation, and testing.
@@ -1578,7 +1588,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
     if add_noise and noise_backend == 'o4_psd':
         _sample_rate = int(round(1.0 / time_resolution))
         for _det in detectors:
-            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=_DEFAULT_CACHE)
+            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=psd_cache_dir)
 
     param_dicts = _generate_parameter_sets(config, num_samples)
 
@@ -1595,7 +1605,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
             print(f"\nChunk {chunk_idx + 1}/{num_chunks} ({len(chunk_params)} waveforms)...")
 
         chunk_results = _generate_waveforms_parallel(
-            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise, f_final, noise_backend, highpass_fc
+            chunk_params, time_resolution, approximant, f_lower, num_workers, show_progress, detectors, target_length, add_noise, f_final, noise_backend, psd_cache_dir, highpass_fc
         )
 
         for r in chunk_results:
@@ -1707,7 +1717,8 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
                                    show_progress: bool = True,
                                    detectors: List[str] = None,
                                    add_noise: bool = True,
-                                   noise_backend: str = 'aligo') -> Dict:
+                                   noise_backend: str = 'aligo',
+                                   psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Generate massive gravity waveforms projected to detectors.
     Returns PyTorch DataLoaders for training, validation, and testing.
@@ -1799,7 +1810,7 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
     if add_noise and noise_backend == 'o4_psd':
         _sample_rate = int(round(1.0 / time_resolution))
         for _det in detectors:
-            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=_DEFAULT_CACHE)
+            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=psd_cache_dir)
 
     param_dicts = _generate_parameter_sets(config, num_samples)
 
@@ -1818,7 +1829,7 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
         chunk_results = _generate_modified_waveforms_parallel(
             chunk_params, time_resolution, approximant, f_lower,
             num_workers, show_progress, detectors, target_length,
-            add_noise, lambda_g, f_final, noise_backend, highpass_fc
+            add_noise, lambda_g, f_final, noise_backend, psd_cache_dir, highpass_fc
         )
 
         for r in chunk_results:
@@ -1935,7 +1946,8 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
                                             show_progress: bool = True,
                                             detectors: List[str] = None,
                                             add_noise: bool = True,
-                                            noise_backend: str = 'aligo') -> Dict:
+                                            noise_backend: str = 'aligo',
+                                            psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Generate Lorentz-violating (LV) waveforms projected to detectors.
     Returns PyTorch DataLoaders for training, validation, and testing.
@@ -2052,7 +2064,7 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
     if add_noise and noise_backend == 'o4_psd':
         _sample_rate = int(round(1.0 / time_resolution))
         for _det in detectors:
-            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=_DEFAULT_CACHE)
+            build_o4_psd_cache(_det, n_segments=_DEFAULT_N_SEGS, sample_rate=_sample_rate, cache_dir=psd_cache_dir)
 
     param_dicts = _generate_parameter_sets(config, num_samples)
 
@@ -2071,7 +2083,7 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
         chunk_results = _generate_lv_waveforms_parallel(
             chunk_params, time_resolution, approximant, f_lower,
             num_workers, show_progress, detectors, target_length,
-            add_noise, lambda_g, alpha_lv, A_lv, f_final, noise_backend, highpass_fc
+            add_noise, lambda_g, alpha_lv, A_lv, f_final, noise_backend, psd_cache_dir, highpass_fc
         )
 
         for r in chunk_results:
