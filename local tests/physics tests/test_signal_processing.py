@@ -24,6 +24,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from scipy.signal.windows import tukey as scipy_tukey
+from torch.utils.data import DataLoader, Subset, TensorDataset
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 _DATA_GEN_DIR = str(
@@ -52,6 +54,7 @@ _SIGNAL_SECS = 2.0
 _F_LOWER     = 40.0
 _NUM_SAMPLES = 16
 _NUM_WORKERS = 1   # avoids WSL2/Linux multiprocessing deadlocks inside pytest
+_TUKEY_ALPHA = 0.1
 
 _SMALL_CONFIG = {
     "mass1":        lambda size: np.random.uniform(20, 40, size=size),
@@ -98,6 +101,36 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# ── Pipeline helper ──────────────────────────────────────────────────────────
+def _prewindow_result(result, alpha=_TUKEY_ALPHA):
+    """Pre-apply a Tukey window to every waveform in a result dict.
+
+    Returns a new result dict with the same split structure so that the
+    subsequent whiten_dataloaders call (with apply_tukey=False) implements
+    the correct order: window → whiten → bandpass.
+    """
+    train_ds = result["train_loader"].dataset
+    base_ds  = train_ds.dataset
+    X = base_ds.tensors[0].clone().float()  # (N, D, T)
+    y = base_ds.tensors[1]
+
+    win = torch.from_numpy(scipy_tukey(X.shape[2], alpha=alpha).astype(np.float32))
+    X   = X * win  # broadcast over (N, D)
+
+    new_ds     = TensorDataset(X, y)
+    batch_size = result["metadata"].get("batch_size", 8)
+    train_idx  = train_ds.indices
+    val_idx    = result["val_loader"].dataset.indices
+    test_idx   = result["test_loader"].dataset.indices
+
+    return {
+        "train_loader": DataLoader(Subset(new_ds, train_idx), batch_size=batch_size, shuffle=True),
+        "val_loader":   DataLoader(Subset(new_ds, val_idx),   batch_size=batch_size, shuffle=False),
+        "test_loader":  DataLoader(Subset(new_ds, test_idx),  batch_size=batch_size, shuffle=False),
+        "metadata":     result["metadata"].copy(),
+    }
+
+
 # ── Module-scoped fixtures ────────────────────────────────────────────────────
 @pytest.fixture(scope="module")
 def gr_result():
@@ -132,32 +165,52 @@ def lv_result():
 @pytest.fixture(scope="module")
 def gr_whitened(gr_result):
     return whiten_dataloaders(
-        gr_result, f_lower=_F_LOWER, tukey_side='both',
-        num_workers=_NUM_WORKERS, show_progress=False,
+        _prewindow_result(gr_result), f_lower=_F_LOWER,
+        apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=False,
     )
 
 
 @pytest.fixture(scope="module")
 def mg_whitened(mg_result):
     return whiten_dataloaders(
-        mg_result, f_lower=_F_LOWER, tukey_side='both',
-        num_workers=_NUM_WORKERS, show_progress=False,
+        _prewindow_result(mg_result), f_lower=_F_LOWER,
+        apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=False,
     )
 
 
 @pytest.fixture(scope="module")
 def lv_whitened(lv_result):
     return whiten_dataloaders(
-        lv_result, f_lower=_F_LOWER, tukey_side='both',
-        num_workers=_NUM_WORKERS, show_progress=False,
+        _prewindow_result(lv_result), f_lower=_F_LOWER,
+        apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=False,
     )
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _first_waveform(result):
     """Return the first H1 waveform from the train loader as a numpy array."""
     X, _ = next(iter(result["train_loader"]))
     return X[0, 0].numpy()
+
+
+def _process_waveform(waveform):
+    """Apply the correct pipeline: window → whiten → bandpass."""
+    from gw_datagen import whiten_waveform
+    window = scipy_tukey(len(waveform), alpha=_TUKEY_ALPHA)
+    whitened, _, _ = whiten_waveform(
+        waveform * window,
+        delta_t=_DELTA_T,
+        f_lower=_F_LOWER,
+        apply_bandpass=True,
+        apply_tukey=False,
+    )
+    return whitened
+
+
+def _raw_waveform(result, idx=0):
+    """Return waveform idx directly from the base tensor (no shuffle)."""
+    X = result["train_loader"].dataset.dataset.tensors[0]
+    return X[idx, 0].numpy()
 
 
 # ── Tests: output contract ────────────────────────────────────────────────────
@@ -268,11 +321,9 @@ class TestWhiteningPhysics:
 class TestPlots:
     """Diagnostic plots — no assertions on plot content."""
 
-    def test_plot_pipeline(self, gr_result, mg_result, lv_result,
-                           gr_whitened, mg_whitened, lv_whitened):
+    def test_plot_pipeline(self, gr_result, mg_result, lv_result):
         _plot_all(gr_result, mg_result, lv_result,
-                  gr_whitened, mg_whitened, lv_whitened,
-                  out_dir=_PLOTS_DIR)
+                  None, None, None, out_dir=_PLOTS_DIR)
 
 
 # ── Plot helper ───────────────────────────────────────────────────────────────
@@ -284,25 +335,24 @@ def _plot_all(gr_raw, mg_raw, lv_raw, gr_whi, mg_whi, lv_whi, out_dir):
     out_dir = Path(out_dir)
 
     datasets = [
-        ("GR",                              "steelblue",      gr_raw, gr_whi),
-        (f"MG  (m_g = {_M_G:.2e} kg)",      "tomato",         mg_raw, mg_whi),
-        (f"LV  (α = {_ALPHA_LV})",          "mediumseagreen", lv_raw, lv_whi),
+        ("GR",                          "steelblue",      gr_raw),
+        (f"MG  (m_g = {_M_G:.2e} kg)", "tomato",         mg_raw),
+        (f"LV  (α = {_ALPHA_LV})",      "mediumseagreen", lv_raw),
     ]
 
-    # ── Plot 1: 2×3 grid — raw (top) vs whitened (bottom) ────────────────────
+    meta = gr_raw["metadata"]
+    t    = np.arange(meta["waveform_shape"][1]) * meta["time_resolution"]
+
+    # ── Plot 1: 2×3 grid — raw (top) vs processed (bottom) ───────────────────
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     fig.suptitle(
-        "Signal processing pipeline: raw O4-noised strain vs. whitened  (H1, first sample)",
+        "Signal processing: raw O4-noised vs window→whiten→bandpass  (H1, sample 0)",
         fontsize=12,
     )
 
-    for col, (label, color, raw_res, whi_res) in enumerate(datasets):
-        meta  = raw_res["metadata"]
-        n_pts = meta["waveform_shape"][1]
-        t     = np.arange(n_pts) * meta["time_resolution"]
-
-        raw = _first_waveform(raw_res)
-        whi = _first_waveform(whi_res)
+    for col, (label, color, raw_res) in enumerate(datasets):
+        raw = _raw_waveform(raw_res, idx=0)
+        whi = _process_waveform(raw)
 
         ax_top = axes[0, col]
         ax_top.plot(t, raw, lw=0.4, color=color, alpha=0.85)
@@ -313,9 +363,9 @@ def _plot_all(gr_raw, mg_raw, lv_raw, gr_whi, mg_whi, lv_whi, out_dir):
 
         ax_bot = axes[1, col]
         ax_bot.plot(t, whi, lw=0.4, color=color, alpha=0.85)
-        ax_bot.set_title(f"{label}\nwhitened", fontsize=10)
+        ax_bot.set_title(f"{label}\nprocessed", fontsize=10)
         ax_bot.set_xlabel("Time (s)")
-        ax_bot.set_ylabel("Whitened strain  H1")
+        ax_bot.set_ylabel("Processed strain  H1")
         ax_bot.set_xlim(t[0], t[-1])
 
     fig.tight_layout()
@@ -324,17 +374,15 @@ def _plot_all(gr_raw, mg_raw, lv_raw, gr_whi, mg_whi, lv_whi, out_dir):
     plt.close(fig)
     print(f"Saved: {p1}")
 
-    # ── Plot 2: overlay all three whitened waveforms ──────────────────────────
+    # ── Plot 2: overlay all three processed waveforms ─────────────────────────
     fig2, ax = plt.subplots(figsize=(12, 4))
-    for label, color, _, whi_res in datasets:
-        meta  = whi_res["metadata"]
-        n_pts = meta["waveform_shape"][1]
-        t     = np.arange(n_pts) * meta["time_resolution"]
-        ax.plot(t, _first_waveform(whi_res), lw=0.6, color=color, alpha=0.85, label=label)
+    for label, color, raw_res in datasets:
+        raw = _raw_waveform(raw_res, idx=0)
+        ax.plot(t, _process_waveform(raw), lw=0.6, color=color, alpha=0.85, label=label)
 
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Whitened strain  H1")
-    ax.set_title("Whitened waveforms: GR vs MG vs LV  (H1, first sample)")
+    ax.set_ylabel("Processed strain  H1")
+    ax.set_title("Processed waveforms: GR vs MG vs LV  (H1, sample 0)")
     ax.legend(loc="upper left", fontsize=9)
     ax.set_xlim(t[0], t[-1])
     fig2.tight_layout()
@@ -369,12 +417,15 @@ if __name__ == "__main__":
     )
 
     print("Whitening GR…")
-    gr_whi = whiten_dataloaders(gr, f_lower=_F_LOWER, tukey_side='both', num_workers=_NUM_WORKERS, show_progress=True)
+    gr_whi = whiten_dataloaders(_prewindow_result(gr), f_lower=_F_LOWER,
+                                apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=True)
 
     print("Whitening MG…")
-    mg_whi = whiten_dataloaders(mg, f_lower=_F_LOWER, tukey_side='both', num_workers=_NUM_WORKERS, show_progress=True)
+    mg_whi = whiten_dataloaders(_prewindow_result(mg), f_lower=_F_LOWER,
+                                apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=True)
 
     print("Whitening LV…")
-    lv_whi = whiten_dataloaders(lv, f_lower=_F_LOWER, tukey_side='both', num_workers=_NUM_WORKERS, show_progress=True)
+    lv_whi = whiten_dataloaders(_prewindow_result(lv), f_lower=_F_LOWER,
+                                apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=True)
 
-    _plot_all(gr, mg, lv, gr_whi, mg_whi, lv_whi, out_dir=Path(__file__).parent)
+    _plot_all(gr, mg, lv, None, None, None, out_dir=Path(__file__).parent)

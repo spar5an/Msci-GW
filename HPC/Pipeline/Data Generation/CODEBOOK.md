@@ -364,6 +364,67 @@ Available methods: `global_standardize` (recommended), `per_sample_minmax`, `per
 - `whiten_waveform(waveform, ...)` — PSD-based whitening using Welch + bandpass; returns `(whitened, psd_array, freqs)`
 - `resample_waveform(waveform, original_delta_t, target_delta_t, ...)` — anti-aliased resampling via PyCBC
 
+### Correct whitening pipeline order
+
+`whiten_waveform` supports a `tukey_side` parameter but applies the window **after** whitening and before bandpass by default. The correct order for clean output is:
+
+```
+window → whiten → bandpass
+```
+
+Pre-applying the Tukey window to the raw signal before passing it to `whiten_waveform` ensures that:
+1. The Welch PSD estimator sees a discontinuity-free signal (better PSD estimate)
+2. The bandpass FIR filter receives cleanly windowed input (no edge ringing)
+
+**Single waveform:**
+```python
+from scipy.signal.windows import tukey
+
+window = tukey(len(waveform), alpha=0.1)
+whitened, psd, freqs = whiten_waveform(
+    waveform * window,
+    delta_t=1/4096,
+    f_lower=40.0,
+    apply_bandpass=True,
+    apply_tukey=False,   # window already applied
+)
+```
+
+**Full dataset (DataLoader result):**
+
+Pre-window the tensors first, then call `whiten_dataloaders` with `apply_tukey=False`:
+
+```python
+from scipy.signal.windows import tukey
+from torch.utils.data import DataLoader, Subset, TensorDataset
+import torch, numpy as np
+
+def prewindow_result(result, alpha=0.1):
+    train_ds = result["train_loader"].dataset
+    base_ds  = train_ds.dataset
+    X = base_ds.tensors[0].clone().float()       # (N, D, T)
+    y = base_ds.tensors[1]
+    win = torch.from_numpy(tukey(X.shape[2], alpha=alpha).astype(np.float32))
+    X   = X * win                                # broadcast over (N, D)
+    new_ds     = TensorDataset(X, y)
+    batch_size = result["metadata"].get("batch_size", 8)
+    return {
+        "train_loader": DataLoader(Subset(new_ds, train_ds.indices),
+                                   batch_size=batch_size, shuffle=True),
+        "val_loader":   DataLoader(Subset(new_ds, result["val_loader"].dataset.indices),
+                                   batch_size=batch_size, shuffle=False),
+        "test_loader":  DataLoader(Subset(new_ds, result["test_loader"].dataset.indices),
+                                   batch_size=batch_size, shuffle=False),
+        "metadata": result["metadata"].copy(),
+    }
+
+whitened_result = whiten_dataloaders(
+    prewindow_result(result),
+    f_lower=40.0,
+    apply_tukey=False,   # window already applied
+)
+```
+
 ---
 
 ## Output Structure and Metadata
@@ -444,15 +505,13 @@ Loading reconstructs the exact same split using `torch.utils.data.Subset`. The t
 
 ## Testing
 
-Tests live in `Msci-GW/local tests/code tests/`.
+### Code tests — `Msci-GW/local tests/code tests/`
 
 | File | Covers |
 |------|--------|
 | `test_analytic.py` | GR, MG, LV with analytic aLIGO noise; save/load round-trip; plots |
 | `test_o4_real.py` | O4 PSD cache validation; GR, MG, LV with real O4 noise; save/load; plots |
 | `conftest.py` | Shared fixtures: `small_config`, `base_kwargs`, `aligo_kwargs`, `psd_cache_dir` |
-
-Run with:
 
 ```bash
 cd "Msci-GW/local tests/code tests"
@@ -463,6 +522,28 @@ Key fixture defaults (`conftest.py`):
 - `num_samples=16`, `num_workers=1` (serial to avoid WSL2 deadlocks), `batch_size=8`
 - `train_split=0.7`, `val_split=0.15`
 - `psd_cache_dir` fixture auto-skips all O4 tests if the cache is not populated
+
+### Physics tests — `Msci-GW/local tests/physics tests/`
+
+| File | Covers |
+|------|--------|
+| `test_mg_gr_limit.py` | MG phase shift vanishes as m_g → 0; waveform convergence to GR |
+| `test_signal_processing.py` | Signal processing pipeline on O4-noised GR/MG/LV data |
+
+```bash
+cd "Msci-GW/local tests/physics tests"
+python -m pytest test_signal_processing.py -v
+
+# Generate diagnostic plots without pytest:
+python test_signal_processing.py
+```
+
+`test_signal_processing.py` applies the correct **window → whiten → bandpass** pipeline via `prewindow_result` + `whiten_dataloaders(apply_tukey=False)` and asserts:
+- Whitened output is finite and shape-preserving
+- Whitened RMS is O(1) (confirming PSD division upscaled from ~1e-22)
+- GR, MG, and LV whitened amplitudes are within a factor of 100 of each other
+
+Skipped automatically if the O4 PSD cache is missing.
 
 ---
 
