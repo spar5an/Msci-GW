@@ -36,7 +36,7 @@ NUM_WORKERS  = 4
 # ── Waveform settings ─────────────────────────────────────────────────────────
 TIME_RESOLUTION = 1 / 4096   # seconds per sample
 SIGNAL_LENGTH   = 2.0        # seconds
-F_LOWER         = 30.0       # Hz
+F_LOWER         = 10.0       # Hz
 F_FINAL         = 2048.0     # Hz
 APPROXIMANT     = 'IMRPhenomD'
 
@@ -106,6 +106,7 @@ if __name__ == '__main__':
         train_split=TRAIN_SPLIT,
         val_split=VAL_SPLIT,
         add_noise=ADD_NOISE,
+        noise_backend='o4_psd',
         num_workers=NUM_WORKERS,
     )
 

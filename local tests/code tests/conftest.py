@@ -67,7 +67,7 @@ def base_kwargs():
         num_samples=16,
         time_resolution=1 / 4096,
         approximant="IMRPhenomD",
-        f_lower=40.0,
+        f_lower=10.0,
         signal_length=2.0,
         batch_size=8,
         train_split=0.7,

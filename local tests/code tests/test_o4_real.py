@@ -34,15 +34,15 @@ from gw_datagen import (
 from pycbc.noise import noise_from_psd
 from conftest import PLOTS_DIR
 
-LAMBDA_G    = 1e22
+M_G         = 2.21e-64  # kg — graviton mass; equivalent to lambda_g ≈ 1e22 m
 ALPHA_LV    = 3.0
-A_LV        = 1e15
+A_LV        = 5.07e21  # A in eV^{-1} for alpha=3 (DSR); equivalent to lambda_A ≈ 1e15 m
 
 DETECTOR    = "H1"
 SAMPLE_RATE = 4096
 SIGNAL_SECS = 2.0
 DELTA_T     = 1.0 / SAMPLE_RATE
-F_LOWER     = 30.0
+F_LOWER     = 10.0
 TARGET_LEN  = int(SIGNAL_SECS * SAMPLE_RATE)   # 8192
 DELTA_F     = 1.0 / SIGNAL_SECS                # 0.5 Hz
 FLEN        = TARGET_LEN // 2 + 1              # 4097
@@ -66,7 +66,7 @@ def gr_o4(small_config, aligo_kwargs, psd_cache_dir):
 def mg_o4(small_config, aligo_kwargs, psd_cache_dir):
     return pycbc_massive_gravity_data_generator(
         config=small_config,
-        lambda_g=LAMBDA_G,
+        m_g=M_G,
         detectors=["H1"],
         noise_backend="o4_psd",
         psd_cache_dir=psd_cache_dir,
@@ -78,8 +78,8 @@ def lv_o4(small_config, aligo_kwargs, psd_cache_dir):
     return pycbc_lorentz_violation_data_generator(
         config=small_config,
         alpha_lv=ALPHA_LV,
-        A_lv=A_LV,
-        lambda_g=LAMBDA_G,
+        A=A_LV,
+        m_g=M_G,
         detectors=["H1"],
         noise_backend="o4_psd",
         psd_cache_dir=psd_cache_dir,
@@ -288,7 +288,7 @@ class TestPlots:
 
         datasets = [
             (gr_o4, "GR — O4 noise",              "steelblue"),
-            (mg_o4, f"MG (λ_g={LAMBDA_G:.0e} m)", "tomato"),
+            (mg_o4, f"MG (m_g={M_G:.0e} kg)", "tomato"),
             (lv_o4, f"LV (α={ALPHA_LV})",         "mediumseagreen"),
         ]
 

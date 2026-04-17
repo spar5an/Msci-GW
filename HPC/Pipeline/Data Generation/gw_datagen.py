@@ -38,7 +38,7 @@ _O4A_GPS_START  = 1369166418
 _O4A_GPS_END    = 1389744018
 
 _FETCH_DUR      = 256   # seconds of data per segment
-_FFT_LEN        = 4     # Welch FFT length in seconds
+_FFT_LEN        = 32    # Welch FFT length in seconds
 _DEFAULT_N_SEGS = 100
 _DEFAULT_CACHE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'o4_psd_cache')
 
