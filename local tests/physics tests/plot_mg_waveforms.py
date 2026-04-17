@@ -23,6 +23,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.integrate import quad
 from pycbc.waveform import get_fd_waveform
+from pycbc.types import TimeSeries
+from pycbc.filter import highpass_fir
 
 
 # ── Physical constants (matching gw_datagen.py) ───────────────────────────────
@@ -93,6 +95,18 @@ def _lv_phase(freqs, Mc, z, lambda_g, alpha_lv, A_lv, f_c):
     return dpsi_mg + dpsi_lv
 
 
+_HIGHPASS_FC        = 35     # high-pass filter cutoff (Hz) — matches gw_datagen
+_RINGDOWN_TAPER_LEN = 128    # samples cosine-tapered to zero at array end
+
+
+def _apply_end_taper(arr):
+    """Cosine-taper last _RINGDOWN_TAPER_LEN samples to zero (mirrors gw_datagen)."""
+    arr = arr.copy()
+    xi = np.linspace(0, 1, _RINGDOWN_TAPER_LEN)
+    arr[-_RINGDOWN_TAPER_LEN:] *= 0.5 * (1.0 + np.cos(np.pi * xi))
+    return arr
+
+
 def _m_g_to_lambda_g(m_g_kg):
     return _H_PLANCK / (m_g_kg * _C)
 
@@ -139,14 +153,24 @@ hp_gr_amp = np.abs(hp_gr_arr[1:])
 f_c       = float(np.max(freqs_pos[np.nonzero(hp_gr_amp)]))
 
 # TD waveform via IRFFT — keep the full array and trim to the merger window
+dt = 1.0 / (2.0 * F_FINAL)   # sample interval (s)
+
+
 def _to_td(hp_fd_arr):
-    return np.fft.irfft(hp_fd_arr) * DELTA_F * len(np.fft.irfft(hp_fd_arr))
+    """IRFFT + normalise + end-taper + highpass — mirrors gw_datagen pipeline."""
+    td  = np.fft.irfft(hp_fd_arr)
+    N   = len(td)
+    td *= DELTA_F * N
+    td  = _apply_end_taper(td)
+    ts  = TimeSeries(td.astype(np.float64), delta_t=dt)
+    ts  = highpass_fir(ts, _HIGHPASS_FC, 128)
+    return ts.numpy()
+
 
 gr_td = _to_td(hp_gr_arr)
 N_td  = len(gr_td)
 
 # Merger is near the peak amplitude — keep ~0.5 s centred on it
-dt      = 1.0 / (2.0 * F_FINAL)
 n_show  = int(0.5 / dt)
 peak    = int(np.argmax(np.abs(gr_td)))
 i_start = max(0, peak - n_show)
