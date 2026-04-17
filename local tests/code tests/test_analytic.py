@@ -29,9 +29,9 @@ from gw_datagen import (
 from conftest import PLOTS_DIR
 
 NUM_SAMPLES = 16
-LAMBDA_G    = 1e22
+M_G         = 2.21e-64  # kg — graviton mass; equivalent to lambda_g ≈ 1e22 m
 ALPHA_LV    = 3.0
-A_LV        = 1e15
+A_LV        = 5.07e21   # A in eV^{-1} for alpha=3 (DSR); equivalent to lambda_A ≈ 1e15 m
 
 
 # ---------------------------------------------------------------------------
@@ -44,12 +44,12 @@ def gr(small_config, aligo_kwargs):
 @pytest.fixture(scope="session")
 def mg(small_config, aligo_kwargs):
     return pycbc_massive_gravity_data_generator(
-        config=small_config, lambda_g=LAMBDA_G, **aligo_kwargs)
+        config=small_config, m_g=M_G, **aligo_kwargs)
 
 @pytest.fixture(scope="session")
 def lv(small_config, aligo_kwargs):
     return pycbc_lorentz_violation_data_generator(
-        config=small_config, alpha_lv=ALPHA_LV, A_lv=A_LV, lambda_g=LAMBDA_G,
+        config=small_config, alpha_lv=ALPHA_LV, A=A_LV, m_g=M_G,
         **aligo_kwargs)
 
 @pytest.fixture(scope="session")
@@ -98,8 +98,8 @@ class TestGenerators:
         assert X.abs().sum().item() > 0
 
     # MG — just check the physics-specific parts; shared structure already tested above
-    def test_mg_lambda_g(self, mg):
-        assert mg["metadata"]["lambda_g"] == pytest.approx(LAMBDA_G)
+    def test_mg_m_g(self, mg):
+        assert mg["metadata"]["m_g"] == pytest.approx(M_G)
 
     def test_mg_finite_and_nonzero(self, mg):
         assert _all_finite(mg["train_loader"])
@@ -107,8 +107,9 @@ class TestGenerators:
         assert X.abs().sum().item() > 0
 
     # LV — unique physics metadata
-    def test_lv_alpha_lv(self, lv):
+    def test_lv_params(self, lv):
         assert lv["metadata"]["alpha_lv"] == pytest.approx(ALPHA_LV)
+        assert lv["metadata"]["A"] == pytest.approx(A_LV)
 
     def test_lv_finite_and_nonzero(self, lv):
         assert _all_finite(lv["train_loader"])
@@ -155,7 +156,7 @@ class TestPlots:
 
         datasets = [
             (gr, "GR — aLIGO noise",          "steelblue"),
-            (mg, f"MG (λ_g={LAMBDA_G:.0e} m)", "tomato"),
+            (mg, f"MG (m_g={M_G:.0e} kg)", "tomato"),
             (lv, f"LV (α={ALPHA_LV})",         "mediumseagreen"),
         ]
 

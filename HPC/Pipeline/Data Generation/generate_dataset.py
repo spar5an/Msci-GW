@@ -14,80 +14,47 @@ from gw_datagen import (
     pycbc_data_generator,
     pycbc_massive_gravity_data_generator,
     pycbc_lorentz_violation_data_generator,
-    pycbc_data_generator_real_psd,
-    pycbc_modified_data_generator_real_psd,
     save_dataloaders,
 )
 
 # ── CONFIG SECTION — edit everything below this line ─────────────────────────
 
 # Physics mode:
-#   'gr'          — General Relativity (o4_psd GWOSC-cached noise)
-#   'mg'          — Massive Graviton modified gravity (o4_psd noise)
-#   'lv'          — Lorentz Violation (o4_psd noise)
-#   'gr_real_psd' — GR with CSV-based real PSD noise
-#   'mg_real_psd' — Massive Graviton with CSV-based real PSD noise
+#   'gr' — General Relativity
+#   'mg' — Massive Graviton modified gravity
+#   'lv' — Lorentz Violation
+# MODE drives which generator is called and which physics parameters are sampled.
+# All three physics labels (m_g, alpha_lv, A) are always stored in the dataset
+# so that all modes produce the same label dimensions for ML; unused params are 0.
 MODE = 'gr'
 
-NUM_SAMPLES   = 100
-OUTPUT_PATH   = 'dataset.pt'
-ADD_NOISE     = True
-NUM_WORKERS   = 4
-# Noise backend: 'aligo' uses the fast analytical aLIGO PSD (no network access required).
-#                'o4_psd' uses real O4 PSD data sampled from locally saved .npz files.
-#                Run download_o4_psds.py once (on a login node) to populate PSD_CACHE_DIR.
-NOISE_BACKEND = 'aligo'
+NUM_SAMPLES  = 100
+OUTPUT_PATH  = 'dataset.pt'
+ADD_NOISE    = True
+NUM_WORKERS  = 4
 
-# Directory containing pre-downloaded O4 PSD cache files (produced by download_o4_psds.py).
-# Only used when NOISE_BACKEND = 'o4_psd'.  None uses the fixed default location
-# next to gw_datagen.py: <Data Generation>/o4_psd_cache/
-PSD_CACHE_DIR = None
-
-# Graviton mass bounds for uniform m_g sampling (kg).
-# lambda_g is derived per waveform via lambda_g = h / (m_g * c).
-# M_G_MIN = 2.21e-58 kg  ↔  lambda_g_max ≈ 1e16 m   (weak modification)
-# M_G_MAX = 2.21e-56 kg  ↔  lambda_g_min ≈ 1e14 m   (strong modification)
-_H_OVER_C = 6.626e-34 / 2.998e8   # h/c in kg·m — conversion factor m_g → lambda_g
-M_G_MIN = 2.21e-58   # kg
-M_G_MAX = 2.21e-56   # kg
-
-# Parameter distributions — add/remove keys to change what is sampled.
-# Each value must be a function of (size,) returning a numpy array.
-CONFIG = {
-    'mass1':       lambda size: np.random.uniform(10, 50, size=size),
-    'mass2':       lambda size: np.random.uniform(10, 50, size=size),
-    'spin1z':      lambda size: np.random.uniform(-0.99, 0.99, size=size),
-    'spin2z':      lambda size: np.random.uniform(-0.99, 0.99, size=size),
-    'distance':    lambda size: np.random.uniform(100, 1000, size=size),
-    'inclination': lambda size: np.random.uniform(0, np.pi, size=size),
-    'coa_phase':   lambda size: np.random.uniform(0, 2 * np.pi, size=size),
-    'ra':          lambda size: np.random.uniform(0, 2 * np.pi, size=size),
-    'dec':         lambda size: np.arcsin(np.random.uniform(-1, 1, size=size)),
-    'polarization':lambda size: np.random.uniform(0, np.pi, size=size),
-    'redshift':    lambda size: np.random.uniform(0.01, 0.5, size=size),
-    # Uniform sampling in graviton mass m_g (kg), converted to Compton wavelength lambda_g (m)
-    'lambda_g':    lambda size: _H_OVER_C / np.random.uniform(M_G_MIN, M_G_MAX, size=size),
-}
-
-# ── Waveform settings ────────────────────────────────────────────────────────
+# ── Waveform settings ─────────────────────────────────────────────────────────
 TIME_RESOLUTION = 1 / 4096   # seconds per sample
 SIGNAL_LENGTH   = 2.0        # seconds
 F_LOWER         = 30.0       # Hz
 F_FINAL         = 2048.0     # Hz
 APPROXIMANT     = 'IMRPhenomD'
 
-# ── MG / LV parameters (used only for 'mg', 'lv', 'mg_real_psd') ────────────
-# LAMBDA_G = None uses per-waveform lambda_g values from the CONFIG 'lambda_g' entry above
-# (uniform m_g sampling converted to Compton wavelength).
-# Set to a fixed float (metres) to override all per-waveform sampling.
-LAMBDA_G = None
+# ── Modified-gravity parameter bounds ─────────────────────────────────────────
+# Graviton mass (used for MODE = 'mg' and 'lv')
+# M_G_MIN = 2.21e-58 kg  ↔  lambda_g ≈ 1e16 m  (weak modification)
+# M_G_MAX = 2.21e-56 kg  ↔  lambda_g ≈ 1e14 m  (strong modification)
+M_G_MIN  = 2.21e-58   # kg
+M_G_MAX  = 2.21e-56   # kg
 
-# LV parameters (used only for MODE = 'lv')
-ALPHA_LV = 3.0    # dispersion exponent (e.g. 3 = doubly special relativity)
-A_LV     = 1e15   # LV Compton wavelength in metres (np.inf to suppress LV term)
+# LV dispersion exponent (used for MODE = 'lv')
+ALPHA_LV = 3.0   # e.g. 3.0 = doubly special relativity (DSR)
 
-# ── CSV PSD path (used only for 'gr_real_psd' or 'mg_real_psd') ─────────────
-PSD_CSV = 'o4_psds.csv'
+# LV dispersion coefficient A bounds in [eV]^{2-alpha} (used for MODE = 'lv')
+# For alpha=3: A has units eV^{-1}.  Converted to lambda_A internally.
+# A=5.07e21 eV^{-1}  ↔  lambda_A ≈ 1e15 m
+A_MIN = 1e20   # eV^{-1} for alpha=3 (strong LV)
+A_MAX = 1e22   # eV^{-1} for alpha=3 (weak LV)
 
 # ── DataLoader settings ───────────────────────────────────────────────────────
 BATCH_SIZE   = 256
@@ -97,6 +64,37 @@ VAL_SPLIT    = 0.1
 # ── END OF CONFIG SECTION ─────────────────────────────────────────────────────
 
 if __name__ == '__main__':
+    # Astrophysical parameters — sampled identically for all modes
+    CONFIG = {
+        'mass1':        lambda size: np.random.uniform(10, 50, size=size),
+        'mass2':        lambda size: np.random.uniform(10, 50, size=size),
+        'spin1z':       lambda size: np.random.uniform(-0.99, 0.99, size=size),
+        'spin2z':       lambda size: np.random.uniform(-0.99, 0.99, size=size),
+        'distance':     lambda size: np.random.uniform(100, 1000, size=size),
+        'inclination':  lambda size: np.random.uniform(0, np.pi, size=size),
+        'coa_phase':    lambda size: np.random.uniform(0, 2 * np.pi, size=size),
+        'ra':           lambda size: np.random.uniform(0, 2 * np.pi, size=size),
+        'dec':          lambda size: np.arcsin(np.random.uniform(-1, 1, size=size)),
+        'polarization': lambda size: np.random.uniform(0, np.pi, size=size),
+    }
+
+    # Physics labels — always present for consistent ML label dimensions.
+    # Unused parameters are zero; they do not affect waveform generation.
+    if MODE == 'gr':
+        CONFIG['m_g']      = lambda size: np.zeros(size)
+        CONFIG['alpha_lv'] = lambda size: np.zeros(size)
+        CONFIG['A']        = lambda size: np.zeros(size)
+    elif MODE == 'mg':
+        CONFIG['m_g']      = lambda size: np.random.uniform(M_G_MIN, M_G_MAX, size=size)
+        CONFIG['alpha_lv'] = lambda size: np.zeros(size)
+        CONFIG['A']        = lambda size: np.zeros(size)
+    elif MODE == 'lv':
+        CONFIG['m_g']      = lambda size: np.random.uniform(M_G_MIN, M_G_MAX, size=size)
+        CONFIG['alpha_lv'] = lambda size: np.full(size, ALPHA_LV)
+        CONFIG['A']        = lambda size: np.random.uniform(A_MIN, A_MAX, size=size)
+    else:
+        raise ValueError(f"Unknown MODE '{MODE}'. Choose from: 'gr', 'mg', 'lv'")
+
     common_kwargs = dict(
         config=CONFIG,
         num_samples=NUM_SAMPLES,
@@ -111,55 +109,15 @@ if __name__ == '__main__':
         num_workers=NUM_WORKERS,
     )
 
-    _cache_kwargs = {'psd_cache_dir': PSD_CACHE_DIR} if PSD_CACHE_DIR is not None else {}
-
     if MODE == 'gr':
-        result = pycbc_data_generator(
-            f_final=F_FINAL,
-            noise_backend=NOISE_BACKEND,
-            **_cache_kwargs,
-            **common_kwargs,
-        )
+        result = pycbc_data_generator(f_final=F_FINAL, **common_kwargs)
 
     elif MODE == 'mg':
-        result = pycbc_massive_gravity_data_generator(
-            lambda_g=LAMBDA_G,
-            f_final=F_FINAL,
-            noise_backend=NOISE_BACKEND,
-            **_cache_kwargs,
-            **common_kwargs,
-        )
+        result = pycbc_massive_gravity_data_generator(f_final=F_FINAL, **common_kwargs)
 
     elif MODE == 'lv':
         result = pycbc_lorentz_violation_data_generator(
-            alpha_lv=ALPHA_LV,
-            A_lv=A_LV,
-            lambda_g=LAMBDA_G,
-            f_final=F_FINAL,
-            noise_backend=NOISE_BACKEND,
-            **_cache_kwargs,
-            **common_kwargs,
-        )
-
-    elif MODE == 'gr_real_psd':
-        result = pycbc_data_generator_real_psd(
-            psd_csv=PSD_CSV,
-            **common_kwargs,
-        )
-
-    elif MODE == 'mg_real_psd':
-        result = pycbc_modified_data_generator_real_psd(
-            psd_csv=PSD_CSV,
-            lambda_g=LAMBDA_G,
-            f_final=F_FINAL,
-            **common_kwargs,
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown MODE '{MODE}'. "
-            "Choose from: 'gr', 'mg', 'lv', 'gr_real_psd', 'mg_real_psd'"
-        )
+            alpha_lv=ALPHA_LV, f_final=F_FINAL, **common_kwargs)
 
     save_dataloaders(result, OUTPUT_PATH)
     print(f"\nDataset saved to {OUTPUT_PATH}")

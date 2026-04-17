@@ -285,10 +285,41 @@ _M_SUN_SEC = _G * _M_SUN / _C**3     # solar mass in seconds (~4.926e-6 s)
 _H0 = 67.4e3 / _MPC                  # Hubble constant in 1/s
 _OMEGA_M = 0.315
 _OMEGA_LAMBDA = 0.685
+_HBAR_C_EV_M = _H_PLANCK / (2.0 * np.pi) * _C / 1.602e-19   # ℏc in eV·m
 _M_OMEGA_PN = 0.1       # PN breakdown: (m1+m2)·omega = 0.1 (geometric units G=c=1)
 _TAPER_FRACTION = 0.50  # phase taper: smooth to zero over top 50% of f_pn_cutoff
 _HIGHPASS_FC        = 35  # high-pass filter cutoff (Hz) applied to all generated signals
 _RINGDOWN_TAPER_LEN = 128    # samples cosine-tapered to zero at array end before highpass
+_N_RINGDOWN = 500       # samples of merger + early ringdown kept after IRFFT rearrangement
+
+
+def _luminosity_distance_mpc(z):
+    """
+    Analytical flat-ΛCDM luminosity distance via Adachi & Kasai (2012), Eq. 8-9.
+    Returns d_L in Mpc.
+    """
+    s = ((1.0 - _OMEGA_M) / _OMEGA_M) ** (1.0 / 3.0)
+
+    def _xi(a):
+        return (2.0 * np.sqrt(s**3 + 1.0) *
+                (a**-4 - 0.1540*s*a**-3 + 0.4304*s**2*a**-2
+                 + 0.19097*s**3*a**-1 + 0.066941*s**4) ** (-1.0/8.0))
+
+    a = 1.0 / (1.0 + z)
+    d_C_m = (_C / _H0) * (_xi(1.0) - _xi(a))
+    return (1.0 + z) * d_C_m / _MPC
+
+
+_Z_GRID  = np.linspace(1e-4, 3.0, 10_000)
+_DL_GRID = np.array([_luminosity_distance_mpc(z) for z in _Z_GRID])
+_Z_FROM_DL_INTERP = interp1d(_DL_GRID, _Z_GRID,
+                              kind='linear', bounds_error=False,
+                              fill_value=(_Z_GRID[0], _Z_GRID[-1]))
+
+
+def _redshift_from_distance(d_L_mpc):
+    """Return redshift for a flat-ΛCDM luminosity distance d_L_mpc [Mpc]."""
+    return float(_Z_FROM_DL_INTERP(d_L_mpc))
 
 
 def _D_alpha(alpha, z):
@@ -497,11 +528,60 @@ def _additional_phase_lv(freqs, chirp_mass, z, lambda_g, alpha_lv, A_lv, f_c,
     return total_phase
 
 
+def _m_g_to_lambda_g(m_g_kg):
+    """Convert graviton mass m_g [kg] to Compton wavelength λ_g [m] = h/(m_g·c).
+    m_g = 0 or non-finite → λ_g = inf (massless/GR limit).
+    """
+    if not np.isfinite(m_g_kg) or m_g_kg <= 0:
+        return np.inf
+    return _H_PLANCK / (m_g_kg * _C)
+
+
+def _A_to_lambda_A(A_eV, alpha_lv):
+    """Convert LV dispersion coefficient A [eV^{2-alpha}] to Compton wavelength λ_A [m].
+    Implements Mirshekari et al. (2011), Eq. 13: λ_A = ℏc · A^{1/(α-2)}.
+    A <= 0, non-finite, or alpha_lv == 2 → λ_A = inf (suppresses LV term).
+    """
+    if not np.isfinite(A_eV) or A_eV <= 0 or alpha_lv == 2.0:
+        return np.inf
+    return _HBAR_C_EV_M * float(A_eV) ** (1.0 / (alpha_lv - 2.0))
+
+
+def _fd_to_td_polarisations(hp_fd_array, hc_fd_array, delta_f, target_length,
+                             time_resolution, highpass_fc=_HIGHPASS_FC):
+    """Convert FD polarisation arrays to anti-ringing TD TimeSeries.
+
+    Steps: IRFFT + normalise → rearrange to [inspiral|merger|ringdown]
+    → cosine-taper tail → highpass FIR filter.
+    """
+    hp_raw = np.fft.irfft(hp_fd_array)
+    hc_raw = np.fft.irfft(hc_fd_array)
+    N = len(hp_raw)
+    hp_raw *= delta_f * N
+    hc_raw *= delta_f * N
+
+    if target_length <= N:
+        n_pre = target_length - _N_RINGDOWN
+        hp_arr = np.concatenate([hp_raw[N - n_pre:], hp_raw[:_N_RINGDOWN]])
+        hc_arr = np.concatenate([hc_raw[N - n_pre:], hc_raw[:_N_RINGDOWN]])
+    else:
+        hp_arr = np.concatenate([np.zeros(target_length - N), hp_raw])
+        hc_arr = np.concatenate([np.zeros(target_length - N), hc_raw])
+
+    hp_arr = _apply_end_taper(hp_arr)
+    hc_arr = _apply_end_taper(hc_arr)
+    hp_ts = TimeSeries(hp_arr.astype(np.float64), delta_t=time_resolution)
+    hc_ts = TimeSeries(hc_arr.astype(np.float64), delta_t=time_resolution)
+    hp_ts = highpass_fir(hp_ts, highpass_fc, 128)
+    hc_ts = highpass_fir(hc_ts, highpass_fc, 128)
+    return hp_ts, hc_ts
+
+
 def _generate_single_lv_waveform(params: dict, time_resolution: float,
                                   approximant: str, f_lower: float,
                                   detectors: list, target_length: int,
-                                  add_noise: bool, lambda_g: float,
-                                  alpha_lv: float, A_lv: float,
+                                  add_noise: bool, m_g: float,
+                                  alpha_lv: float, A: float,
                                   f_final: float,
                                   noise_backend: str = 'aligo',
                                   psd_cache_dir: str = _DEFAULT_CACHE,
@@ -530,13 +610,15 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
         Desired number of output samples.
     add_noise : bool
         Whether to add aLIGO noise.
-    lambda_g : float
-        Graviton Compton wavelength in metres. Use np.inf for GR (no mass term).
+    m_g : float
+        Graviton mass in kg. Converted to λ_g = h/(m_g·c) internally.
+        Use 0 to suppress the mass term (GR limit).
     alpha_lv : float
         LV dispersion exponent (α_LV). Key values: 3 (DSR), 4 (Horava-Lifshitz).
-    A_lv : float
-        LV Compton wavelength in metres (A ≡ A_physical^{1/(α−2)}).
-        Use np.inf to suppress the LV term (pure massive-graviton or GR).
+    A : float
+        LV dispersion coefficient from Mirshekari et al. (2011) Eq. 1, in units
+        [eV]^{2-α}. Converted to λ_A internally via Eq. 13.
+        Use np.inf to suppress the LV term.
     f_final : float
         Upper frequency cutoff in Hz.
 
@@ -565,15 +647,17 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
         m1 = params['mass1']
         m2 = params['mass2']
         chirp_mass = (m1 * m2)**(3.0 / 5.0) / (m1 + m2)**(1.0 / 5.0)
-        z = params.get('redshift', 0.1)
+        z = _redshift_from_distance(params.get('distance', 410.0))
 
         freqs = hp_fd.sample_frequencies.numpy()[1:]
         hp_fd_amp = np.abs(hp_fd.numpy()[1:])
         f_c = float(np.max(freqs[np.nonzero(hp_fd_amp)]))
 
-        # Per-sample overrides for lambda_g / A_lv
-        lg    = params.get('lambda_g', lambda_g)
-        a_lv  = params.get('A_lv', A_lv)
+        # Per-sample overrides — convert m_g [kg] → λ_g [m]; A [eV^{2-α}] → λ_A [m]
+        m_g_val = params.get('m_g', m_g)
+        lg      = _m_g_to_lambda_g(m_g_val)
+        A_val   = params.get('A', A)
+        a_lv    = _A_to_lambda_A(A_val, alpha_lv)
 
         # PN breakdown frequency: phase modification is only valid in the inspiral
         f_pn = _M_OMEGA_PN / (np.pi * (m1 + m2) * _M_SUN_SEC)
@@ -587,27 +671,8 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
         hp_array[1:] = hp_array[1:] * np.exp(1j * phase_shift)
         hc_array[1:] = hc_array[1:] * np.exp(1j * phase_shift)
 
-        hp_raw = np.fft.irfft(hp_array)
-        hc_raw = np.fft.irfft(hc_array)
-        N = len(hp_raw)
-        hp_raw *= delta_f * N
-        hc_raw *= delta_f * N
-
-        n_ringdown = 500
-        if target_length <= N:
-            n_pre = target_length - n_ringdown
-            hp_arr = np.concatenate([hp_raw[N - n_pre:], hp_raw[:n_ringdown]])
-            hc_arr = np.concatenate([hc_raw[N - n_pre:], hc_raw[:n_ringdown]])
-        else:
-            hp_arr = np.concatenate([np.zeros(target_length - N), hp_raw])
-            hc_arr = np.concatenate([np.zeros(target_length - N), hc_raw])
-
-        hp_arr = _apply_end_taper(hp_arr)
-        hc_arr = _apply_end_taper(hc_arr)
-        hp_ts = TimeSeries(hp_arr.astype(np.float64), delta_t=time_resolution)
-        hc_ts = TimeSeries(hc_arr.astype(np.float64), delta_t=time_resolution)
-        hp_ts = highpass_fir(hp_ts, highpass_fc, 128)
-        hc_ts = highpass_fir(hc_ts, highpass_fc, 128)
+        hp_ts, hc_ts = _fd_to_td_polarisations(
+            hp_array, hc_array, delta_f, target_length, time_resolution, highpass_fc)
 
         gps_time = params.get('gps_time', 1126259462.4)
         hp_ts.start_time += gps_time
@@ -1231,7 +1296,7 @@ def _generate_waveforms_parallel(param_dicts: List[Dict],
 def _generate_single_modified_waveform(params: Dict, time_resolution: float,
                                         approximant: str, f_lower: float,
                                         detectors: List[str], target_length: int,
-                                        add_noise: bool, lambda_g: float,
+                                        add_noise: bool, m_g: float,
                                         f_final: float,
                                         noise_backend: str = 'aligo',
                                         psd_cache_dir: str = _DEFAULT_CACHE,
@@ -1259,8 +1324,9 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
         Desired number of output samples.
     add_noise : bool
         Whether to add aLIGO noise.
-    lambda_g : float
-        Graviton Compton wavelength in metres.
+    m_g : float
+        Graviton mass in kg. Converted to λ_g = h/(m_g·c) internally.
+        Use 0 to suppress the mass term (GR limit).
     f_final : float
         Upper frequency cutoff for FD waveform generation.
 
@@ -1289,10 +1355,11 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
         m1 = params['mass1']
         m2 = params['mass2']
         chirp_mass = (m1 * m2)**(3.0 / 5.0) / (m1 + m2)**(1.0 / 5.0)
-        z = params.get('redshift', 0.1)
+        z = _redshift_from_distance(params.get('distance', 410.0))
 
         freqs = hp_fd.sample_frequencies.numpy()[1:]
-        lg = params.get('lambda_g', lambda_g)
+        m_g_val = params.get('m_g', m_g)
+        lg = _m_g_to_lambda_g(m_g_val)
 
         f_pn = _M_OMEGA_PN / (np.pi * (m1 + m2) * _M_SUN_SEC)
 
@@ -1304,27 +1371,8 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
         hp_array[1:] = hp_array[1:] * np.exp(1j * phase_shift)
         hc_array[1:] = hc_array[1:] * np.exp(1j * phase_shift)
 
-        hp_raw = np.fft.irfft(hp_array)
-        hc_raw = np.fft.irfft(hc_array)
-        N = len(hp_raw)
-        hp_raw *= delta_f * N
-        hc_raw *= delta_f * N
-
-        n_ringdown = 500
-        if target_length <= N:
-            n_pre = target_length - n_ringdown
-            hp_arr = np.concatenate([hp_raw[N - n_pre:], hp_raw[:n_ringdown]])
-            hc_arr = np.concatenate([hc_raw[N - n_pre:], hc_raw[:n_ringdown]])
-        else:
-            hp_arr = np.concatenate([np.zeros(target_length - N), hp_raw])
-            hc_arr = np.concatenate([np.zeros(target_length - N), hc_raw])
-
-        hp_arr = _apply_end_taper(hp_arr)
-        hc_arr = _apply_end_taper(hc_arr)
-        hp_ts = TimeSeries(hp_arr.astype(np.float64), delta_t=time_resolution)
-        hc_ts = TimeSeries(hc_arr.astype(np.float64), delta_t=time_resolution)
-        hp_ts = highpass_fir(hp_ts, highpass_fc, 128)
-        hc_ts = highpass_fir(hc_ts, highpass_fc, 128)
+        hp_ts, hc_ts = _fd_to_td_polarisations(
+            hp_array, hc_array, delta_f, target_length, time_resolution, highpass_fc)
 
         gps_time = params.get('gps_time', 1126259462.4)
         hp_ts.start_time += gps_time
@@ -1383,7 +1431,7 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
                                            detectors: List[str],
                                            target_length: int,
                                            add_noise: bool,
-                                           lambda_g: float,
+                                           m_g: float,
                                            f_final: float,
                                            noise_backend: str = 'aligo',
                                            psd_cache_dir: str = _DEFAULT_CACHE,
@@ -1397,7 +1445,7 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
         detectors=detectors,
         target_length=target_length,
         add_noise=add_noise,
-        lambda_g=lambda_g,
+        m_g=m_g,
         f_final=f_final,
         noise_backend=noise_backend,
         psd_cache_dir=psd_cache_dir,
@@ -1433,9 +1481,9 @@ def _generate_lv_waveforms_parallel(param_dicts: List[Dict],
                                      detectors: List[str],
                                      target_length: int,
                                      add_noise: bool,
-                                     lambda_g: float,
+                                     m_g: float,
                                      alpha_lv: float,
-                                     A_lv: float,
+                                     A: float,
                                      f_final: float,
                                      noise_backend: str = 'aligo',
                                      psd_cache_dir: str = _DEFAULT_CACHE,
@@ -1449,9 +1497,9 @@ def _generate_lv_waveforms_parallel(param_dicts: List[Dict],
         detectors=detectors,
         target_length=target_length,
         add_noise=add_noise,
-        lambda_g=lambda_g,
+        m_g=m_g,
         alpha_lv=alpha_lv,
-        A_lv=A_lv,
+        A=A,
         f_final=f_final,
         noise_backend=noise_backend,
         psd_cache_dir=psd_cache_dir,
@@ -1703,7 +1751,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
 
 def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
                                    num_samples: int,
-                                   lambda_g: float = None,
+                                   m_g: float = None,
                                    time_resolution: float = 1/4096,
                                    approximant: str = 'IMRPhenomD',
                                    f_lower: float = 30.0,
@@ -1735,9 +1783,9 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
         plus all standard sky/orientation params.
     num_samples : int
         Total number of waveforms to generate.
-    lambda_g : float, optional
-        Graviton Compton wavelength in metres (dataset-level constant).
-        If None, 'lambda_g' must be provided in config as a per-sample
+    m_g : float, optional
+        Graviton mass in kg (dataset-level constant).
+        If None, 'm_g' must be provided in config as a per-sample
         distribution. If both are given, the config (per-sample) takes
         precedence.
     time_resolution : float
@@ -1778,11 +1826,11 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
         raise ValueError("train_split and val_split must be between 0 and 1")
     if train_split + val_split >= 1:
         raise ValueError("train_split + val_split must be < 1")
-    lambda_g_in_config = 'lambda_g' in config
-    if lambda_g is None and not lambda_g_in_config:
-        raise ValueError("lambda_g must be provided either as an argument or in config")
-    if lambda_g is not None and lambda_g <= 0:
-        raise ValueError("lambda_g must be positive")
+    m_g_in_config = 'm_g' in config
+    if m_g is None and not m_g_in_config:
+        raise ValueError("m_g must be provided either as an argument or in config")
+    if m_g is not None and m_g <= 0:
+        raise ValueError("m_g must be positive")
 
     if num_workers is None:
         num_workers = 1
@@ -1798,10 +1846,10 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
     }
 
     target_length = int(signal_length / time_resolution)
-    if lambda_g_in_config:
-        print(f"Generating {num_samples} MODIFIED waveforms (lambda_g=per-sample from config)")
+    if m_g_in_config:
+        print(f"Generating {num_samples} MODIFIED waveforms (m_g=per-sample from config)")
     else:
-        print(f"Generating {num_samples} MODIFIED waveforms (lambda_g={lambda_g:.2e} m)")
+        print(f"Generating {num_samples} MODIFIED waveforms (m_g={m_g:.2e} kg)")
     print(f"  Approximant: {approximant} (frequency domain)")
     print(f"  Frequency range: {f_lower}-{f_final} Hz")
     print(f"  Detectors: {detectors}")
@@ -1830,7 +1878,7 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
         chunk_results = _generate_modified_waveforms_parallel(
             chunk_params, time_resolution, approximant, f_lower,
             num_workers, show_progress, detectors, target_length,
-            add_noise, lambda_g, f_final, noise_backend, psd_cache_dir, highpass_fc
+            add_noise, m_g, f_final, noise_backend, psd_cache_dir, highpass_fc
         )
 
         for r in chunk_results:
@@ -1920,8 +1968,8 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
             'chunk_size': chunk_size,
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
-            'lambda_g': lambda_g,
-            'lambda_g_varied': lambda_g_in_config,
+            'm_g': m_g,
+            'm_g_varied': m_g_in_config,
             'waveform_type': 'massive_gravity',
             'preprocessing': {}
         }
@@ -1931,8 +1979,8 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
 def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
                                             num_samples: int,
                                             alpha_lv: float,
-                                            A_lv: float = None,
-                                            lambda_g: float = None,
+                                            A: float = None,
+                                            m_g: float = None,
                                             time_resolution: float = 1/4096,
                                             approximant: str = 'IMRPhenomD',
                                             f_lower: float = 30.0,
@@ -1955,30 +2003,29 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
 
     Mirrors pycbc_massive_gravity_data_generator but applies the generalised
     LV phase from Mirshekari, Yunes & Will (2011), arXiv:1110.2720, which
-    combines a massive graviton term (lambda_g) with a power-law LV term
-    (alpha_lv, A_lv).
+    combines a massive graviton term (m_g) with a power-law LV term
+    (alpha_lv, A).
 
     Parameters
     ----------
     config : dict
         Dictionary mapping parameter names to numpy distribution functions.
         Required: 'mass1', 'mass2'. Optional: 'redshift' (default 0.1),
-        'lambda_g' (per-sample override), 'A_lv' (per-sample override),
+        'm_g' (per-sample override), 'A' (per-sample override),
         plus all standard sky/orientation params.
     num_samples : int
         Total number of waveforms to generate.
     alpha_lv : float
         LV dispersion exponent. Key values: 2.5 (non-commutative geometry),
         3.0 (doubly special relativity), 4.0 (extra dimensions / Horava-Lifshitz).
-    A_lv : float, optional
-        LV Compton wavelength in metres (dataset-level constant).
-        If None, 'A_lv' must be provided in config as a per-sample distribution.
+    A : float, optional
+        LV dispersion coefficient in eV^{2-alpha} (dataset-level constant).
+        If None, 'A' must be provided in config as a per-sample distribution.
         If both are given, the config (per-sample) takes precedence.
         Set to np.inf to suppress the LV term (pure massive-graviton limit).
-    lambda_g : float, optional
-        Graviton Compton wavelength in metres. Use np.inf to suppress the mass
-        term (pure LV limit). If None, 'lambda_g' must be in config or
-        lambda_g defaults to np.inf.
+    m_g : float, optional
+        Graviton mass in kg. Use np.inf to suppress the mass term (pure LV
+        limit). If None, 'm_g' must be in config or m_g defaults to np.inf.
     time_resolution : float
         Time step delta_t. Default: 1/4096
     approximant : str
@@ -2018,18 +2065,18 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
     if train_split + val_split >= 1:
         raise ValueError("train_split + val_split must be < 1")
 
-    A_lv_in_config = 'A_lv' in config
-    if A_lv is None and not A_lv_in_config:
-        raise ValueError("A_lv must be provided either as an argument or in config")
-    if A_lv is not None and A_lv <= 0:
-        raise ValueError("A_lv must be positive")
+    A_in_config = 'A' in config
+    if A is None and not A_in_config:
+        raise ValueError("A must be provided either as an argument or in config")
+    if A is not None and A <= 0:
+        raise ValueError("A must be positive")
 
-    lambda_g_in_config = 'lambda_g' in config
-    # lambda_g defaults to np.inf (suppress mass term) if not given
-    if lambda_g is None and not lambda_g_in_config:
-        lambda_g = np.inf
-    if lambda_g is not None and lambda_g <= 0:
-        raise ValueError("lambda_g must be positive")
+    m_g_in_config = 'm_g' in config
+    # m_g defaults to np.inf (suppress mass term) if not given
+    if m_g is None and not m_g_in_config:
+        m_g = np.inf
+    if m_g is not None and m_g <= 0:
+        raise ValueError("m_g must be positive")
 
     if num_workers is None:
         num_workers = 1
@@ -2046,16 +2093,16 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
 
     target_length = int(signal_length / time_resolution)
     print(f"Generating {num_samples} LORENTZ-VIOLATING waveforms (alpha_lv={alpha_lv})")
-    if A_lv_in_config:
-        print(f"  A_lv=per-sample from config")
+    if A_in_config:
+        print(f"  A=per-sample from config")
     else:
-        print(f"  A_lv={A_lv:.2e} m")
-    if lambda_g_in_config:
-        print(f"  lambda_g=per-sample from config")
-    elif np.isinf(lambda_g):
-        print(f"  lambda_g=inf (mass term suppressed)")
+        print(f"  A={A:.2e}")
+    if m_g_in_config:
+        print(f"  m_g=per-sample from config")
+    elif np.isinf(m_g):
+        print(f"  m_g=inf (mass term suppressed)")
     else:
-        print(f"  lambda_g={lambda_g:.2e} m")
+        print(f"  m_g={m_g:.2e} kg")
     print(f"  Approximant: {approximant} (frequency domain)")
     print(f"  Frequency range: {f_lower}-{f_final} Hz")
     print(f"  Detectors: {detectors}")
@@ -2084,7 +2131,7 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
         chunk_results = _generate_lv_waveforms_parallel(
             chunk_params, time_resolution, approximant, f_lower,
             num_workers, show_progress, detectors, target_length,
-            add_noise, lambda_g, alpha_lv, A_lv, f_final, noise_backend, psd_cache_dir, highpass_fc
+            add_noise, m_g, alpha_lv, A, f_final, noise_backend, psd_cache_dir, highpass_fc
         )
 
         for r in chunk_results:
@@ -2175,10 +2222,10 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
             'alpha_lv': alpha_lv,
-            'A_lv': A_lv,
-            'A_lv_varied': A_lv_in_config,
-            'lambda_g': lambda_g,
-            'lambda_g_varied': lambda_g_in_config,
+            'A': A,
+            'A_varied': A_in_config,
+            'm_g': m_g,
+            'm_g_varied': m_g_in_config,
             'waveform_type': 'lorentz_violation',
             'preprocessing': {}
         }

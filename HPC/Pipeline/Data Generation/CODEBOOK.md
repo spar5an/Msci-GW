@@ -83,12 +83,12 @@ The GR worker uses a **FD→IRFFT** pipeline (not PyCBC's native TD generator) s
 Same interface as GR plus:
 
 ```python
-lambda_g = ...    # graviton Compton wavelength in metres (required)
+m_g = ...    # graviton mass in kg (required)
 ```
 
-Adds the massive graviton phase shift `δΨ = −β · u⁻¹` in the frequency domain before IRFFT (see Physics section). The parameter `lambda_g` can also be included in `config` to vary it per sample.
+Adds the massive graviton phase shift `δΨ = −β · u⁻¹` in the frequency domain before IRFFT (see Physics section). The parameter `m_g` can also be included in `config` to vary it per sample.
 
-Metadata extras: `lambda_g`, `lambda_g_varied` (bool).
+Metadata extras: `m_g`, `m_g_varied` (bool).
 
 ### `pycbc_lorentz_violation_data_generator` — Lorentz violation (LV)
 
@@ -96,13 +96,13 @@ Same interface as GR plus:
 
 ```python
 alpha_lv = ...    # dispersion exponent α (required)
-A_lv     = ...    # LV Compton wavelength in metres (required)
-lambda_g = ...    # graviton mass term; use np.inf to suppress (required)
+A        = ...    # LV Compton wavelength in metres (optional)
+m_g      = ...    # graviton mass in kg; omit or set None to suppress MG term (optional)
 ```
 
-Applies the generalised LV phase from Mirshekari, Yunes & Will (2011). Both `lambda_g` and `A_lv` can be included in `config` for per-sample variation.
+Applies the generalised LV phase from Mirshekari, Yunes & Will (2011). Both `m_g` and `A` can be included in `config` for per-sample variation.
 
-Metadata extras: `alpha_lv`, `A_lv`, `lambda_g`, `lambda_g_varied`, `A_lv_varied`.
+Metadata extras: `alpha_lv`, `A`, `m_g`, `m_g_varied`, `A_varied`.
 
 ---
 
@@ -129,8 +129,8 @@ config = {
     'redshift':     lambda size: np.random.uniform(0.05, 0.5, size=size),  # default 0.1
 
     # MG/LV only — can be fixed or varied per sample
-    'lambda_g':     lambda size: ...,                      # metres
-    'A_lv':         lambda size: ...,                      # metres
+    'm_g':          lambda size: ...,                      # kg  (graviton mass)
+    'A':            lambda size: ...,                      # metres  (LV Compton wavelength)
 }
 ```
 
@@ -268,7 +268,7 @@ The total phase correction is:
 δΨ_LV = −ζ · (u^{α−1} − u_c^{α−1})     [α ≠ 1, 2]
 δΨ_LV = +ζ · (ln u − ln u_c)             [α = 1]
 
-ζ = π^{2−α}/(1−α) · c^{1−α} · D_α(z) · M^{1−α} / (A_lv^{2−α} · (1+z)^{1−α})
+ζ = π^{2−α}/(1−α) · c^{1−α} · D_α(z) · M^{1−α} / (A^{2−α} · (1+z)^{1−α})
 ```
 
 The phase is normalised to zero at `u_c = π M f_c` where `f_c` is the maximum non-zero frequency of the waveform (peak of inspiral amplitude). This removes an unphysical divergence in `u^{α−1}` for α < 1.
@@ -284,7 +284,7 @@ The phase is normalised to zero at `u_c = π M f_c` where `f_c` is the maximum n
 | 3 | Doubly special relativity (DSR) |
 | 4 | Extra dimensions / Hořava-Lifshitz gravity |
 
-Setting `lambda_g = np.inf` suppresses the MG term; setting `A_lv = np.inf` suppresses the LV term; `alpha_lv = 2` is also suppressed automatically.
+Setting `m_g = None` (or omitting it) suppresses the MG term; setting `A = np.inf` suppresses the LV term; `alpha_lv = 2` is also suppressed automatically.
 
 ---
 
@@ -399,15 +399,15 @@ result['metadata'] = {
     'preprocessing':      dict,             # empty by default
 
     # MG only
-    'lambda_g':           float,
-    'lambda_g_varied':    bool,
+    'm_g':                float,
+    'm_g_varied':         bool,
 
     # LV only
     'alpha_lv':           float,
-    'A_lv':               float,
-    'lambda_g':           float,
-    'lambda_g_varied':    bool,
-    'A_lv_varied':        bool,
+    'A':                  float,
+    'm_g':                float,
+    'm_g_varied':         bool,
+    'A_varied':           bool,
     'waveform_type':      'lorentz_violation',
 }
 ```

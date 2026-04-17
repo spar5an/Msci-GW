@@ -7,8 +7,14 @@ Run from this directory:
 
 import sys
 import time
+from pathlib import Path
 import numpy as np
 import torch
+
+sys.path.insert(0, str(
+    Path(__file__).resolve().parent.parent.parent
+    / "HPC" / "Pipeline" / "Data Generation"
+))
 
 from gw_datagen import (
     pycbc_data_generator,
@@ -46,8 +52,8 @@ KWARGS = dict(
 
 CASES = [
     ('GR',  pycbc_data_generator,                   {}),
-    ('MG',  pycbc_massive_gravity_data_generator,   {'lambda_g': 1e22}),
-    ('LV',  pycbc_lorentz_violation_data_generator, {'lambda_g': 1e22, 'alpha_lv': 3.0, 'A_lv': 1e15}),
+    ('MG',  pycbc_massive_gravity_data_generator,   {'m_g': 2.21e-64}),
+    ('LV',  pycbc_lorentz_violation_data_generator, {'m_g': 2.21e-64, 'alpha_lv': 3.0, 'A': 1e21}),
 ]
 
 NUM_SAMPLES = KWARGS['num_samples']
