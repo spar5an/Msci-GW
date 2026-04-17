@@ -39,6 +39,7 @@ from gw_datagen import (
     pycbc_massive_gravity_data_generator,
     pycbc_lorentz_violation_data_generator,
     whiten_dataloaders,
+    process_waveform,
     _DEFAULT_CACHE,
     _cache_path,
 )
@@ -51,7 +52,7 @@ _A_LV     = 1e15      # metres  (LV Compton wavelength)
 _SAMPLE_RATE = 4096
 _DELTA_T     = 1.0 / _SAMPLE_RATE
 _SIGNAL_SECS = 2.0
-_F_LOWER     = 40.0
+_F_LOWER     = 10.0
 _NUM_SAMPLES = 16
 _NUM_WORKERS = 1   # avoids WSL2/Linux multiprocessing deadlocks inside pytest
 _TUKEY_ALPHA = 0.1
@@ -193,18 +194,15 @@ def _first_waveform(result):
     return X[0, 0].numpy()
 
 
-def _process_waveform(waveform):
-    """Apply the correct pipeline: window → whiten → bandpass."""
-    from gw_datagen import whiten_waveform
-    window = scipy_tukey(len(waveform), alpha=_TUKEY_ALPHA)
-    whitened, _, _ = whiten_waveform(
-        waveform * window,
-        delta_t=_DELTA_T,
-        f_lower=_F_LOWER,
-        apply_bandpass=True,
-        apply_tukey=False,
+_HIGHPASS_FC = 35.0  # post-whitening highpass; kept above 10 Hz to avoid FIR ringing
+
+
+def _process_waveform(waveform, detector="H1"):
+    return process_waveform(
+        waveform, detector=detector,
+        delta_t=_DELTA_T, f_lower=_F_LOWER, highpass_fc=_HIGHPASS_FC,
+        tukey_alpha=_TUKEY_ALPHA, sample_rate=_SAMPLE_RATE,
     )
-    return whitened
 
 
 def _raw_waveform(result, idx=0):
@@ -321,75 +319,59 @@ class TestWhiteningPhysics:
 class TestPlots:
     """Diagnostic plots — no assertions on plot content."""
 
-    def test_plot_pipeline(self, gr_result, mg_result, lv_result):
-        _plot_all(gr_result, mg_result, lv_result,
-                  None, None, None, out_dir=_PLOTS_DIR)
+    def test_plot_pipeline(self, gr_result):
+        _plot_pipeline(gr_result, out_dir=_PLOTS_DIR)
 
 
 # ── Plot helper ───────────────────────────────────────────────────────────────
-def _plot_all(gr_raw, mg_raw, lv_raw, gr_whi, mg_whi, lv_whi, out_dir):
+_N_PLOT = 5
+
+
+def _plot_pipeline(result, out_dir, n=_N_PLOT):
+    """5-row × 2-col plot: raw O4-noised strain (left) | processed (right)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     out_dir = Path(out_dir)
-
-    datasets = [
-        ("GR",                          "steelblue",      gr_raw),
-        (f"MG  (m_g = {_M_G:.2e} kg)", "tomato",         mg_raw),
-        (f"LV  (α = {_ALPHA_LV})",      "mediumseagreen", lv_raw),
-    ]
-
-    meta = gr_raw["metadata"]
+    meta = result["metadata"]
     t    = np.arange(meta["waveform_shape"][1]) * meta["time_resolution"]
+    X    = result["train_loader"].dataset.dataset.tensors[0]
+    n    = min(n, X.shape[0])
 
-    # ── Plot 1: 2×3 grid — raw (top) vs processed (bottom) ───────────────────
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(n, 2, figsize=(12, 2.5 * n), sharex=True)
     fig.suptitle(
-        "Signal processing: raw O4-noised vs window→whiten→bandpass  (H1, sample 0)",
-        fontsize=12,
+        "GR waveforms — raw O4-noised (left) vs processed (right)\n"
+        "pipeline: Tukey window → whiten (O4 PSD) → bandpass 35–300 Hz  [H1]",
+        fontsize=11,
     )
 
-    for col, (label, color, raw_res) in enumerate(datasets):
-        raw = _raw_waveform(raw_res, idx=0)
+    for row in range(n):
+        raw = X[row, 0].numpy()
         whi = _process_waveform(raw)
 
-        ax_top = axes[0, col]
-        ax_top.plot(t, raw, lw=0.4, color=color, alpha=0.85)
-        ax_top.set_title(f"{label}\nraw + O4 noise", fontsize=10)
-        ax_top.set_ylabel("Strain  H1")
-        ax_top.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
-        ax_top.set_xlim(t[0], t[-1])
+        ax_raw = axes[row, 0]
+        ax_raw.plot(t, raw, lw=0.5, color="steelblue", alpha=0.9)
+        ax_raw.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+        ax_raw.set_ylabel(f"Sample {row}\nStrain", fontsize=8)
+        ax_raw.set_xlim(t[0], t[-1])
+        if row == 0:
+            ax_raw.set_title("Raw + O4 noise", fontsize=10)
 
-        ax_bot = axes[1, col]
-        ax_bot.plot(t, whi, lw=0.4, color=color, alpha=0.85)
-        ax_bot.set_title(f"{label}\nprocessed", fontsize=10)
-        ax_bot.set_xlabel("Time (s)")
-        ax_bot.set_ylabel("Processed strain  H1")
-        ax_bot.set_xlim(t[0], t[-1])
+        ax_whi = axes[row, 1]
+        ax_whi.plot(t, whi, lw=0.5, color="darkorange", alpha=0.9)
+        ax_whi.set_xlim(t[0], t[-1])
+        if row == 0:
+            ax_whi.set_title("Processed", fontsize=10)
+
+    for ax in axes[-1]:
+        ax.set_xlabel("Time (s)")
 
     fig.tight_layout()
-    p1 = out_dir / "signal_processing_pipeline.png"
-    fig.savefig(p1, dpi=120, bbox_inches="tight")
+    p = out_dir / "signal_processing_pipeline.png"
+    fig.savefig(p, dpi=120, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved: {p1}")
-
-    # ── Plot 2: overlay all three processed waveforms ─────────────────────────
-    fig2, ax = plt.subplots(figsize=(12, 4))
-    for label, color, raw_res in datasets:
-        raw = _raw_waveform(raw_res, idx=0)
-        ax.plot(t, _process_waveform(raw), lw=0.6, color=color, alpha=0.85, label=label)
-
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Processed strain  H1")
-    ax.set_title("Processed waveforms: GR vs MG vs LV  (H1, sample 0)")
-    ax.legend(loc="upper left", fontsize=9)
-    ax.set_xlim(t[0], t[-1])
-    fig2.tight_layout()
-    p2 = out_dir / "whitened_comparison.png"
-    fig2.savefig(p2, dpi=120, bbox_inches="tight")
-    plt.close(fig2)
-    print(f"Saved: {p2}")
+    print(f"Saved: {p}")
 
 
 # ── Standalone execution ──────────────────────────────────────────────────────
@@ -405,27 +387,4 @@ if __name__ == "__main__":
     print("Generating GR dataset  (O4 noise)…")
     gr = pycbc_data_generator(config=_SMALL_CONFIG, detectors=["H1"], **_COMMON_KWARGS)
 
-    print("Generating MG dataset  (O4 noise)…")
-    mg = pycbc_massive_gravity_data_generator(
-        config=_SMALL_CONFIG, m_g=_M_G, detectors=["H1"], **_COMMON_KWARGS
-    )
-
-    print("Generating LV dataset  (O4 noise)…")
-    lv = pycbc_lorentz_violation_data_generator(
-        config=_SMALL_CONFIG, alpha_lv=_ALPHA_LV, A=_A_LV,
-        detectors=["H1"], **_COMMON_KWARGS,
-    )
-
-    print("Whitening GR…")
-    gr_whi = whiten_dataloaders(_prewindow_result(gr), f_lower=_F_LOWER,
-                                apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=True)
-
-    print("Whitening MG…")
-    mg_whi = whiten_dataloaders(_prewindow_result(mg), f_lower=_F_LOWER,
-                                apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=True)
-
-    print("Whitening LV…")
-    lv_whi = whiten_dataloaders(_prewindow_result(lv), f_lower=_F_LOWER,
-                                apply_tukey=False, num_workers=_NUM_WORKERS, show_progress=True)
-
-    _plot_all(gr, mg, lv, None, None, None, out_dir=Path(__file__).parent)
+    _plot_pipeline(gr, out_dir=Path(__file__).parent)

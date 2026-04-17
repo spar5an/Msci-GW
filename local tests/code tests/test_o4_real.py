@@ -255,6 +255,48 @@ class TestSaveLoad:
 
 
 # ---------------------------------------------------------------------------
+# TestWhitenedSave — X_whitened is written alongside X for all three generators.
+# Inspects the raw .pt blob since load_dataloaders only exposes DataLoaders.
+# ---------------------------------------------------------------------------
+class TestWhitenedSave:
+    @pytest.mark.parametrize("path_fixture", [
+        "saved_path_gr", "saved_path_mg", "saved_path_lv",
+    ])
+    def test_x_whitened_key_present(self, path_fixture, request):
+        path = request.getfixturevalue(path_fixture)
+        blob = torch.load(path, weights_only=False)
+        assert "X_whitened" in blob
+
+    @pytest.mark.parametrize("path_fixture", [
+        "saved_path_gr", "saved_path_mg", "saved_path_lv",
+    ])
+    def test_x_whitened_shape_matches_x(self, path_fixture, request):
+        path = request.getfixturevalue(path_fixture)
+        blob = torch.load(path, weights_only=False)
+        assert blob["X_whitened"].shape == blob["X"].shape
+
+    @pytest.mark.parametrize("path_fixture", [
+        "saved_path_gr", "saved_path_mg", "saved_path_lv",
+    ])
+    def test_x_whitened_finite_and_nonzero(self, path_fixture, request):
+        path = request.getfixturevalue(path_fixture)
+        Xw   = torch.load(path, weights_only=False)["X_whitened"]
+        assert torch.isfinite(Xw).all()
+        assert Xw.abs().sum().item() > 0
+
+    @pytest.mark.parametrize("path_fixture", [
+        "saved_path_gr", "saved_path_mg", "saved_path_lv",
+    ])
+    def test_x_whitened_differs_from_x(self, path_fixture, request):
+        # Whitened strain is O(1); raw signal+noise is O(1e-21). An exact
+        # match would mean whitening silently did nothing.
+        path = request.getfixturevalue(path_fixture)
+        blob = torch.load(path, weights_only=False)
+        assert not torch.equal(blob["X_whitened"], blob["X"])
+        assert blob["X_whitened"].std().item() > blob["X"].std().item() * 1e10
+
+
+# ---------------------------------------------------------------------------
 # TestGeneratorEndToEnd — all three generators with o4_psd backend
 # ---------------------------------------------------------------------------
 class TestGeneratorEndToEnd:

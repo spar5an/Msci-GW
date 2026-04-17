@@ -143,6 +143,41 @@ class TestSaveLoad:
 
 
 # ---------------------------------------------------------------------------
+# TestWhitenedSave — save_dataloaders now also writes X_whitened alongside X.
+# These tests inspect the raw .pt (torch.load), since load_dataloaders only
+# surfaces the DataLoader-consumable tensors.
+# ---------------------------------------------------------------------------
+class TestWhitenedSave:
+    def test_x_whitened_key_present(self, saved_path):
+        blob = torch.load(saved_path, weights_only=False)
+        assert "X_whitened" in blob
+
+    def test_x_whitened_shape_matches_x(self, saved_path):
+        blob = torch.load(saved_path, weights_only=False)
+        assert blob["X_whitened"].shape == blob["X"].shape
+
+    def test_x_whitened_finite_and_nonzero(self, saved_path):
+        Xw = torch.load(saved_path, weights_only=False)["X_whitened"]
+        assert torch.isfinite(Xw).all()
+        assert Xw.abs().sum().item() > 0
+
+    def test_x_whitened_differs_from_x(self, saved_path):
+        # A whitened strain sits O(1) while the raw signal+noise is O(1e-21);
+        # an exact match would mean whitening silently did nothing.
+        blob = torch.load(saved_path, weights_only=False)
+        assert not torch.equal(blob["X_whitened"], blob["X"])
+        assert blob["X_whitened"].std().item() > blob["X"].std().item() * 1e10
+
+    def test_x_whitened_roundtrip(self, saved_path, tmp_path):
+        # Load → save → reload; tensor must survive byte-exact.
+        orig     = torch.load(saved_path, weights_only=False)["X_whitened"]
+        out      = tmp_path / "resaved.pt"
+        torch.save({"X_whitened": orig}, out)
+        reloaded = torch.load(out, weights_only=False)["X_whitened"]
+        assert torch.equal(orig, reloaded)
+
+
+# ---------------------------------------------------------------------------
 # TestPlots — diagnostic plots, no content assertions
 # ---------------------------------------------------------------------------
 class TestPlots:

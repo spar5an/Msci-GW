@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 _O4A_GPS_START  = 1369166418
 _O4A_GPS_END    = 1389744018
 
-_FETCH_DUR      = 256   # seconds of data per segment
+_FETCH_DUR      = 32    # seconds of data per segment
 _FFT_LEN        = 32    # Welch FFT length in seconds
 _DEFAULT_N_SEGS = 100
 _DEFAULT_CACHE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'o4_psd_cache')
@@ -290,7 +290,7 @@ _M_OMEGA_PN = 0.1       # PN breakdown: (m1+m2)·omega = 0.1 (geometric units G=
 _TAPER_FRACTION = 0.50  # phase taper: smooth to zero over top 50% of f_pn_cutoff
 _HIGHPASS_FC        = 35  # high-pass filter cutoff (Hz) applied to all generated signals
 _RINGDOWN_TAPER_LEN = 128    # samples cosine-tapered to zero at array end before highpass
-_N_RINGDOWN = 500       # samples of merger + early ringdown kept after IRFFT rearrangement
+# _N_RINGDOWN removed: waveforms are now centred on coalescence (merger at target_length//2)
 
 
 def _luminosity_distance_mpc(z):
@@ -551,7 +551,8 @@ def _fd_to_td_polarisations(hp_fd_array, hc_fd_array, delta_f, target_length,
                              time_resolution, highpass_fc=_HIGHPASS_FC):
     """Convert FD polarisation arrays to anti-ringing TD TimeSeries.
 
-    Steps: IRFFT + normalise → rearrange to [inspiral|merger|ringdown]
+    Steps: IRFFT + normalise → rearrange so coalescence sits at index
+    target_length//2 (t=0, 1 s before and 1 s after at 4096 Hz)
     → cosine-taper tail → highpass FIR filter.
     """
     hp_raw = np.fft.irfft(hp_fd_array)
@@ -560,13 +561,26 @@ def _fd_to_td_polarisations(hp_fd_array, hc_fd_array, delta_f, target_length,
     hp_raw *= delta_f * N
     hc_raw *= delta_f * N
 
+    n_half = target_length // 2
     if target_length <= N:
-        n_pre = target_length - _N_RINGDOWN
-        hp_arr = np.concatenate([hp_raw[N - n_pre:], hp_raw[:_N_RINGDOWN]])
-        hc_arr = np.concatenate([hc_raw[N - n_pre:], hc_raw[:_N_RINGDOWN]])
+        hp_arr = np.concatenate([hp_raw[N - n_half:], hp_raw[:target_length - n_half]])
+        hc_arr = np.concatenate([hc_raw[N - n_half:], hc_raw[:target_length - n_half]])
     else:
-        hp_arr = np.concatenate([np.zeros(target_length - N), hp_raw])
-        hc_arr = np.concatenate([np.zeros(target_length - N), hc_raw])
+        # Waveform shorter than window: centre it, zero-pad both sides
+        n_post = min(N, target_length - n_half)
+        n_pre  = N - n_post
+        hp_arr = np.concatenate([
+            np.zeros(n_half - n_pre),
+            hp_raw[N - n_pre:] if n_pre else np.zeros(0),
+            hp_raw[:n_post],
+            np.zeros((target_length - n_half) - n_post),
+        ])
+        hc_arr = np.concatenate([
+            np.zeros(n_half - n_pre),
+            hc_raw[N - n_pre:] if n_pre else np.zeros(0),
+            hc_raw[:n_post],
+            np.zeros((target_length - n_half) - n_post),
+        ])
 
     hp_arr = _apply_end_taper(hp_arr)
     hc_arr = _apply_end_taper(hc_arr)
@@ -583,7 +597,7 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
                                   add_noise: bool, m_g: float,
                                   alpha_lv: float, A: float,
                                   f_final: float,
-                                  noise_backend: str = 'aligo',
+                                  noise_backend: str = 'o4_psd',
                                   psd_cache_dir: str = _DEFAULT_CACHE,
                                   highpass_fc: float = _HIGHPASS_FC) -> dict:
     """
@@ -707,6 +721,7 @@ def _generate_single_lv_waveform(params: dict, time_resolution: float,
                 duration = target_length * delta_t
                 delta_f_noise = 1.0 / duration
                 flen = target_length // 2 + 1
+                # aligo: analytic PSD — for debugging/quick tests only, not realistic noise
                 if noise_backend == 'aligo':
                     psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
                 else:
@@ -761,7 +776,8 @@ def normalize_waveform(waveform, scale_factor=1e21):
 
 
 def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
-                    apply_tukey=True, tukey_alpha=0.1, tukey_side='left'):
+                    apply_tukey=True, tukey_alpha=0.1, tukey_side='both',
+                    psd=None):
     """
     Whiten a single waveform using PSD-based whitening.
 
@@ -769,11 +785,11 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
 
     The whitening process:
     1. Optionally apply Tukey window to prevent edge effects
-    2. Compute PSD using Welch's method
-    3. Interpolate PSD to smooth frequency grid
-    4. Divide frequency-domain data by sqrt(PSD)
-    5. Convert back to time domain
-    6. Optionally apply bandpass filter (35-300 Hz)
+    2. Estimate PSD via Welch (long data) or aLIGO analytic PSD (short data),
+       unless a PSD is supplied directly via the ``psd`` argument
+    3. Divide frequency-domain data by sqrt(PSD)
+    4. Convert back to time domain
+    5. Optionally apply bandpass filter (35-300 Hz)
 
     Parameters
     ----------
@@ -790,10 +806,13 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     tukey_alpha : float, optional
         Tukey window alpha parameter - fraction of signal to taper (default: 0.1)
     tukey_side : str, optional
-        Which side(s) to apply the Tukey taper (default: 'left')
-        - 'left': Only taper the beginning (preserves merger at end)
+        Which side(s) to apply the Tukey taper (default: 'both')
+        - 'both': Taper both sides — correct when merger is centred at t=0
+        - 'left': Only taper the beginning
         - 'right': Only taper the end
-        - 'both': Taper both sides (standard Tukey window)
+    psd : pycbc.types.FrequencySeries, optional
+        Pre-computed PSD to use directly, bypassing PSD estimation.
+        Useful for simulated data where the generation PSD is known exactly.
 
     Returns
     -------
@@ -815,7 +834,9 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     strain = TimeSeries(data, delta_t=delta_t)
 
     n_samples = len(strain)
-    if n_samples >= 8192:
+    if psd is not None:
+        pass  # use caller-supplied PSD as-is
+    elif n_samples >= 8192:
         seg_len = 4096
         seg_stride = 2048
         psd_welch = welch(strain, seg_len=seg_len, seg_stride=seg_stride)
@@ -867,8 +888,71 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     return whitened, psd_array, freqs
 
 
+def process_waveform(
+    waveform,
+    detector: str = "H1",
+    delta_t: float = 1 / 4096,
+    f_lower: float = 10.0,
+    highpass_fc: float = 35.0,
+    tukey_alpha: float = 0.1,
+    apply_bandpass: bool = True,
+    sample_rate: int = 4096,
+    cache_dir: str = _DEFAULT_CACHE,
+) -> np.ndarray:
+    """Apply the full processing pipeline to a single waveform.
+
+    Combines Tukey windowing, O4 PSD loading, and whitening into one call.
+    Pipeline: window → whiten (O4 cached PSD) → bandpass.
+
+    Parameters
+    ----------
+    waveform : np.ndarray
+        Raw 1-D strain array.
+    detector : str
+        Detector name used to look up the O4 PSD cache (e.g. ``'H1'``).
+    delta_t : float
+        Sample spacing in seconds.
+    f_lower : float
+        Lower frequency for the O4 PSD floor during noise injection and PSD
+        loading.  Kept separate from ``highpass_fc`` so the PSD covers low
+        frequencies without driving the post-whitening highpass too low.
+    highpass_fc : float
+        Highpass cutoff applied after whitening (default 35 Hz).  A FIR
+        highpass at very low frequencies needs many more taps than the 128
+        used here, so keeping this at ≥35 Hz avoids edge ringing.
+    tukey_alpha : float
+        Fraction of the signal to taper at each end.
+    apply_bandpass : bool
+        Apply highpass (at ``highpass_fc``) + lowpass 300 Hz after whitening.
+    sample_rate : int
+        Sample rate in Hz — must match the cached PSD.
+    cache_dir : str
+        Directory containing the O4 PSD ``.npz`` cache files.
+
+    Returns
+    -------
+    np.ndarray
+        Processed waveform (same length as input).
+    """
+    from scipy.signal.windows import tukey
+    n = len(waveform)
+    flen = n // 2 + 1
+    delta_f = 1.0 / (n * delta_t)
+    psd = load_random_o4_psd(flen, delta_f, f_lower, detector, sample_rate, cache_dir=cache_dir)
+    window = tukey(n, alpha=tukey_alpha)
+    whitened, _, _ = whiten_waveform(
+        waveform * window,
+        delta_t=delta_t,
+        f_lower=highpass_fc,
+        apply_bandpass=apply_bandpass,
+        apply_tukey=False,
+        psd=psd,
+    )
+    return whitened
+
+
 def resample_waveform(waveform, original_delta_t, target_delta_t,
-                      apply_tukey=True, tukey_alpha=0.1, tukey_side='left'):
+                      apply_tukey=True, tukey_alpha=0.1, tukey_side='both'):
     """
     Resample a single waveform to a different sampling rate.
 
@@ -888,7 +972,7 @@ def resample_waveform(waveform, original_delta_t, target_delta_t,
     tukey_alpha : float, optional
         Tukey window alpha parameter - fraction of signal to taper (default: 0.1)
     tukey_side : str, optional
-        Which side(s) to apply the Tukey taper (default: 'left')
+        Which side(s) to apply the Tukey taper (default: 'both')
 
     Returns
     -------
@@ -1139,7 +1223,7 @@ def _generate_parameter_sets(config: Dict[str, Callable], num_samples: int) -> L
 def _generate_single_waveform(params: Dict, time_resolution: float, approximant: str,
                               f_lower: float, detectors: List[str], target_length: int,
                               add_noise: bool = True, f_final: float = 2048.0,
-                              noise_backend: str = 'aligo',
+                              noise_backend: str = 'o4_psd',
                               psd_cache_dir: str = _DEFAULT_CACHE,
                               highpass_fc: float = _HIGHPASS_FC) -> Dict:
     """Worker function to generate a single waveform and project to detectors at fixed length.
@@ -1173,14 +1257,25 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
         hp_raw *= delta_f * N
         hc_raw *= delta_f * N
 
-        n_ringdown = 500
+        n_half = target_length // 2
         if target_length <= N:
-            n_pre = target_length - n_ringdown
-            hp_arr = np.concatenate([hp_raw[N - n_pre:], hp_raw[:n_ringdown]])
-            hc_arr = np.concatenate([hc_raw[N - n_pre:], hc_raw[:n_ringdown]])
+            hp_arr = np.concatenate([hp_raw[N - n_half:], hp_raw[:target_length - n_half]])
+            hc_arr = np.concatenate([hc_raw[N - n_half:], hc_raw[:target_length - n_half]])
         else:
-            hp_arr = np.concatenate([np.zeros(target_length - N), hp_raw])
-            hc_arr = np.concatenate([np.zeros(target_length - N), hc_raw])
+            n_post = min(N, target_length - n_half)
+            n_pre  = N - n_post
+            hp_arr = np.concatenate([
+                np.zeros(n_half - n_pre),
+                hp_raw[N - n_pre:] if n_pre else np.zeros(0),
+                hp_raw[:n_post],
+                np.zeros((target_length - n_half) - n_post),
+            ])
+            hc_arr = np.concatenate([
+                np.zeros(n_half - n_pre),
+                hc_raw[N - n_pre:] if n_pre else np.zeros(0),
+                hc_raw[:n_post],
+                np.zeros((target_length - n_half) - n_post),
+            ])
 
         hp_arr = _apply_end_taper(hp_arr)
         hc_arr = _apply_end_taper(hc_arr)
@@ -1225,6 +1320,7 @@ def _generate_single_waveform(params: Dict, time_resolution: float, approximant:
 
                 flen = target_length // 2 + 1
 
+                # aligo: analytic PSD — for debugging/quick tests only, not realistic noise
                 if noise_backend == 'aligo':
                     psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
                 else:
@@ -1255,7 +1351,7 @@ def _generate_waveforms_parallel(param_dicts: List[Dict],
                                 target_length: int,
                                 add_noise: bool,
                                 f_final: float = 2048.0,
-                                noise_backend: str = 'aligo',
+                                noise_backend: str = 'o4_psd',
                                 psd_cache_dir: str = _DEFAULT_CACHE,
                                 highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
     """Generate waveforms in parallel using multiprocessing."""
@@ -1298,7 +1394,7 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
                                         detectors: List[str], target_length: int,
                                         add_noise: bool, m_g: float,
                                         f_final: float,
-                                        noise_backend: str = 'aligo',
+                                        noise_backend: str = 'o4_psd',
                                         psd_cache_dir: str = _DEFAULT_CACHE,
                                         highpass_fc: float = _HIGHPASS_FC) -> Dict:
     """
@@ -1404,6 +1500,7 @@ def _generate_single_modified_waveform(params: Dict, time_resolution: float,
                 duration = target_length * delta_t
                 delta_f_noise = 1.0 / duration
                 flen = target_length // 2 + 1
+                # aligo: analytic PSD — for debugging/quick tests only, not realistic noise
                 if noise_backend == 'aligo':
                     psd = aLIGOZeroDetHighPower(flen, delta_f_noise, f_lower)
                 else:
@@ -1433,7 +1530,7 @@ def _generate_modified_waveforms_parallel(param_dicts: List[Dict],
                                            add_noise: bool,
                                            m_g: float,
                                            f_final: float,
-                                           noise_backend: str = 'aligo',
+                                           noise_backend: str = 'o4_psd',
                                            psd_cache_dir: str = _DEFAULT_CACHE,
                                            highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
     """Generate modified waveforms in parallel using multiprocessing."""
@@ -1485,7 +1582,7 @@ def _generate_lv_waveforms_parallel(param_dicts: List[Dict],
                                      alpha_lv: float,
                                      A: float,
                                      f_final: float,
-                                     noise_backend: str = 'aligo',
+                                     noise_backend: str = 'o4_psd',
                                      psd_cache_dir: str = _DEFAULT_CACHE,
                                      highpass_fc: float = _HIGHPASS_FC) -> List[Dict]:
     """Generate Lorentz-violating waveforms in parallel using multiprocessing."""
@@ -1532,7 +1629,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
                         num_samples: int,
                         time_resolution: float = 1/4096,
                         approximant: str = 'IMRPhenomD',
-                        f_lower: float = 40.0,
+                        f_lower: float = 10.0,
                         f_final: float = 2048.0,
                         highpass_fc: float = _HIGHPASS_FC,
                         num_workers: int = None,
@@ -1544,7 +1641,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
                         show_progress: bool = True,
                         detectors: List[str] = None,
                         add_noise: bool = True,
-                        noise_backend: str = 'aligo',
+                        noise_backend: str = 'o4_psd',
                         psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Generate PyCBC waveforms projected to detectors.
@@ -1744,6 +1841,7 @@ def pycbc_data_generator(config: Dict[str, Callable],
             'chunk_size': chunk_size,
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
+            'noise_backend': noise_backend,
             'preprocessing': {}
         }
     }
@@ -1754,7 +1852,7 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
                                    m_g: float = None,
                                    time_resolution: float = 1/4096,
                                    approximant: str = 'IMRPhenomD',
-                                   f_lower: float = 30.0,
+                                   f_lower: float = 10.0,
                                    f_final: float = 2048.0,
                                    highpass_fc: float = _HIGHPASS_FC,
                                    num_workers: int = None,
@@ -1766,7 +1864,7 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
                                    show_progress: bool = True,
                                    detectors: List[str] = None,
                                    add_noise: bool = True,
-                                   noise_backend: str = 'aligo',
+                                   noise_backend: str = 'o4_psd',
                                    psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Generate massive gravity waveforms projected to detectors.
@@ -1968,6 +2066,7 @@ def pycbc_massive_gravity_data_generator(config: Dict[str, Callable],
             'chunk_size': chunk_size,
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
+            'noise_backend': noise_backend,
             'm_g': m_g,
             'm_g_varied': m_g_in_config,
             'waveform_type': 'massive_gravity',
@@ -1983,7 +2082,7 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
                                             m_g: float = None,
                                             time_resolution: float = 1/4096,
                                             approximant: str = 'IMRPhenomD',
-                                            f_lower: float = 30.0,
+                                            f_lower: float = 10.0,
                                             f_final: float = 2048.0,
                                             highpass_fc: float = _HIGHPASS_FC,
                                             num_workers: int = None,
@@ -1995,7 +2094,7 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
                                             show_progress: bool = True,
                                             detectors: List[str] = None,
                                             add_noise: bool = True,
-                                            noise_backend: str = 'aligo',
+                                            noise_backend: str = 'o4_psd',
                                             psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Generate Lorentz-violating (LV) waveforms projected to detectors.
@@ -2221,6 +2320,7 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
             'chunk_size': chunk_size,
             'sky_params_provided': sky_params_provided,
             'add_noise': add_noise,
+            'noise_backend': noise_backend,
             'alpha_lv': alpha_lv,
             'A': A,
             'A_varied': A_in_config,
@@ -2235,9 +2335,36 @@ def pycbc_lorentz_violation_data_generator(config: Dict[str, Callable],
 
 ################### Save / Load ###################
 
+def _whiten_batch(X: torch.Tensor, delta_t: float) -> torch.Tensor:
+    """
+    Apply ``whiten_waveform`` to every (sample, detector) pair of a
+    (N, D, T) tensor and return a tensor of the same shape and dtype.
+
+    Uses the same settings as the real-data pipeline (Tukey α=0.1 both sides,
+    bandpass 35–300 Hz, f_lower=20 Hz) so simulated and real processed data
+    share an identical transformation.
+    """
+    arr = X.detach().cpu().numpy().astype(np.float64)
+    N, D, _ = arr.shape
+    out = np.zeros_like(arr)
+    for n in range(N):
+        for d in range(D):
+            w, _, _ = whiten_waveform(
+                arr[n, d], delta_t=delta_t, f_lower=20.0,
+                apply_bandpass=True, apply_tukey=True,
+                tukey_alpha=0.1, tukey_side='both',
+            )
+            out[n, d] = w
+    return torch.from_numpy(out).to(X.dtype)
+
+
 def save_dataloaders(result: Dict, save_path: str) -> None:
     """
     Save the datasets from a pycbc_data_generator result.
+
+    Saves both the raw (signal + coloured noise) waveforms as ``X`` and a
+    whitened + bandpassed version as ``X_whitened``, using the same whitening
+    settings as the real-data pipeline.
 
     Parameters
     ----------
@@ -2262,11 +2389,16 @@ def save_dataloaders(result: Dict, save_path: str) -> None:
     X = base_dataset.tensors[0]
     y = base_dataset.tensors[1]
 
+    delta_t = result['metadata']['time_resolution']
+    print(f"  Whitening {X.shape[0]} sample(s) across {X.shape[1]} detector(s) …")
+    X_whitened = _whiten_batch(X, delta_t)
+
     save_data = {
         'train_indices': train_dataset.indices,
         'val_indices': val_dataset.indices,
         'test_indices': test_dataset.indices,
         'X': X,
+        'X_whitened': X_whitened,
         'y': y,
         'metadata': result['metadata']
     }
@@ -2597,7 +2729,7 @@ def truncate_dataloaders(result: Dict,
 
 def _whiten_single_waveform(args):
     """Worker function for parallel whitening."""
-    waveform, delta_t, f_lower, apply_bandpass, apply_tukey, tukey_alpha, tukey_side = args
+    waveform, delta_t, f_lower, apply_bandpass, apply_tukey, tukey_alpha, tukey_side, psd = args
     whitened, _, _ = whiten_waveform(
         waveform,
         delta_t=delta_t,
@@ -2605,7 +2737,8 @@ def _whiten_single_waveform(args):
         apply_bandpass=apply_bandpass,
         apply_tukey=apply_tukey,
         tukey_alpha=tukey_alpha,
-        tukey_side=tukey_side
+        tukey_side=tukey_side,
+        psd=psd,
     )
     return whitened
 
@@ -2615,13 +2748,19 @@ def whiten_dataloaders(result: Dict,
                        apply_bandpass: bool = True,
                        apply_tukey: bool = True,
                        tukey_alpha: float = 0.1,
-                       tukey_side: str = 'left',
+                       tukey_side: str = 'both',
                        batch_size: int = None,
                        preserve_splits: bool = True,
                        num_workers: int = 1,
-                       show_progress: bool = True) -> Dict:
+                       show_progress: bool = True,
+                       psd_cache_dir: str = _DEFAULT_CACHE) -> Dict:
     """
     Whiten all waveforms in a DataLoader result.
+
+    For simulated datasets (noise_backend stored in metadata) the known
+    generation PSD is used directly rather than estimating it from each
+    2-second waveform via Welch, which would give a poor estimate and
+    introduce ringing artefacts.
 
     Parameters
     ----------
@@ -2636,7 +2775,8 @@ def whiten_dataloaders(result: Dict,
     tukey_alpha : float
         Tukey window alpha parameter. Default: 0.1
     tukey_side : str
-        Which side(s) to apply the Tukey taper. Default: 'left'
+        Which side(s) to apply the Tukey taper. Default: 'both'
+        (correct when merger is centred at t=0)
     batch_size : int, optional
         Batch size for new DataLoaders. If None, uses original batch_size
     preserve_splits : bool
@@ -2673,7 +2813,40 @@ def whiten_dataloaders(result: Dict,
 
     num_samples = X_full.shape[0]
     num_detectors = X_full.shape[1]
-    time_length = X_full.shape[2]
+    n_samples = X_full.shape[2]
+
+    # Build the whitening PSD for each detector from the known generation PSD
+    # rather than estimating via Welch on 2 s of data (too few segments →
+    # spectral imbalances → ringing artefacts in the whitened output).
+    # o4_psd: load a representative O4 PSD per detector from the cache.
+    #         Each cached PSD was estimated from 32 s of real O4a data.
+    #         A random draw is used per whitening call, consistent with how
+    #         noise was injected during generation.
+    # aligo:  analytic PSD — for debugging/quick tests only, not realistic noise.
+    noise_backend = metadata.get('noise_backend')
+    detector_names = metadata.get('channels', metadata.get('detectors', []))
+    sample_rate = int(round(1.0 / delta_t))
+    delta_f_white = 1.0 / (n_samples * delta_t)
+    flen_white = n_samples // 2 + 1
+
+    det_psds = {}
+    if noise_backend == 'o4_psd':
+        for det in detector_names:
+            det_psds[det] = load_random_o4_psd(
+                flen_white, delta_f_white, f_lower, det, sample_rate,
+                cache_dir=psd_cache_dir,
+            )
+        print(f"  PSD: O4 cached per-detector ({', '.join(detector_names)})")
+    elif noise_backend == 'aligo':
+        # aligo: analytic PSD — for debugging/quick tests only, not realistic noise
+        aligo_psd = aLIGOZeroDetHighPower(flen_white, delta_f_white, f_lower)
+        for det in detector_names:
+            det_psds[det] = aligo_psd
+        print(f"  PSD: aLIGO analytic (DEBUG — use o4_psd for realistic data)")
+    else:
+        for det in detector_names:
+            det_psds[det] = None   # Welch fallback inside whiten_waveform
+        print(f"  PSD: Welch estimation (no noise_backend in metadata)")
 
     print(f"  Processing {num_samples} waveforms x {num_detectors} detectors...")
 
@@ -2681,9 +2854,9 @@ def whiten_dataloaders(result: Dict,
 
     all_args = []
     for i in range(num_samples):
-        for j in range(num_detectors):
+        for j, det in enumerate(detector_names):
             waveform = X_full[i, j, :].numpy()
-            all_args.append((waveform, delta_t, f_lower, apply_bandpass, apply_tukey, tukey_alpha, tukey_side))
+            all_args.append((waveform, delta_t, f_lower, apply_bandpass, apply_tukey, tukey_alpha, tukey_side, det_psds.get(det)))
 
     if num_workers > 1:
         import multiprocessing as mp
@@ -2751,6 +2924,9 @@ def whiten_dataloaders(result: Dict,
     new_metadata['preprocessing']['whiten_tukey'] = apply_tukey
     new_metadata['preprocessing']['whiten_tukey_alpha'] = tukey_alpha
     new_metadata['preprocessing']['whiten_tukey_side'] = tukey_side
+    new_metadata['preprocessing']['whiten_psd_source'] = (
+        noise_backend if noise_backend in ('aligo', 'o4_psd') else 'welch'
+    )
 
     print(f"\nNew DataLoaders created:")
     print(f"  Waveform shape: {new_metadata['waveform_shape']}")

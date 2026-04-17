@@ -71,7 +71,7 @@ pycbc_data_generator(
     show_progress   = True,
     detectors       = ['H1','L1'],
     add_noise       = True,
-    noise_backend   = 'aligo',     # 'aligo' or 'o4_psd'
+    noise_backend   = 'o4_psd',    # 'o4_psd' (default) or 'aligo' (debug only)
     psd_cache_dir   = <default>,   # path to .npz cache used by o4_psd backend
 )
 ```
@@ -179,21 +179,26 @@ hp_raw *= delta_f * N   # restore correct strain amplitude (delta_f * N = 1/dt)
 
 This is equivalent to the standard IFFT normalisation convention used by PyCBC.
 
-### Step 4: Time-domain windowing
+### Step 4: Time-domain windowing — coalescence centred at t = 0
 
 The IRFFT array has length `N = 2*(len(hp_fd)-1)`. The target output is `target_length = int(signal_length / time_resolution)` samples (e.g. 8192 for 2 s at 4096 Hz).
 
 ```
+n_half = target_length // 2          # e.g. 4096 for a 2 s window
+
 if target_length <= N:
-    # Take the last (target_length - 500) samples [late inspiral]
-    # then the first 500 samples [merger + early ringdown]
-    hp_arr = concat(hp_raw[N - n_pre:], hp_raw[:500])
+    # Take the last n_half samples [late inspiral, t ∈ (−1 s, 0)]
+    # then the first (target_length − n_half) samples [merger + ringdown, t ∈ [0, +1 s)]
+    hp_arr = concat(hp_raw[N - n_half:], hp_raw[:target_length - n_half])
 else:
-    # Zero-pad the beginning (signal shorter than window)
-    hp_arr = concat(zeros(target_length - N), hp_raw)
+    # Waveform shorter than window: centre it, zero-pad both sides
+    n_post = min(N, target_length - n_half)
+    n_pre  = N - n_post
+    hp_arr = concat(zeros(n_half - n_pre), hp_raw[N - n_pre:], hp_raw[:n_post],
+                    zeros((target_length - n_half) - n_post))
 ```
 
-The `n_ringdown = 500` sample wrap ensures the merger peak appears at the end of the window, which is the conventional layout for matched-filter based studies.
+**Coalescence sits at array index `target_length // 2` (t = 0), matching the real LIGO data convention of a 2-second window centred on the merger.** This is essential for training — real GW events are cropped to `[merger − 1 s, merger + 1 s]`, so simulated data must use the same alignment.
 
 ### Step 5: End taper
 
@@ -222,10 +227,11 @@ Uses PyCBC's LAL-backed antenna pattern functions. The resulting `signal` is tri
 ### Step 8: Noise injection
 
 ```python
-if noise_backend == 'aligo':
-    psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
-else:
-    psd = load_random_o4_psd(flen, delta_f, f_lower, det_name, ...)
+# o4_psd (default): randomly sampled real Advanced LIGO O4a PSD per detector
+psd = load_random_o4_psd(flen, delta_f, f_lower, det_name, ...)
+
+# aligo: analytic zero-detuned high-power PSD — for debugging/quick tests only
+# psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
 
 noise = noise_from_psd(target_length, delta_t, psd)
 noise._epoch = signal._epoch          # align timestamps
@@ -233,6 +239,10 @@ signal = signal.inject(noise)
 ```
 
 The epoch alignment is essential: `inject()` performs a time-domain addition and requires both TimeSeries to share the same start time.
+
+> **`noise_backend` values:**
+> - `'o4_psd'` (**default**) — draws a random PSD from the O4a cache (built from real 256 s GWOSC segments). Produces realistic detector noise. Requires the cache to be built first.
+> - `'aligo'` — analytic `aLIGOZeroDetHighPower` PSD. **For debugging and quick unit tests only.** Not representative of real O4 noise characteristics.
 
 ---
 
@@ -361,7 +371,7 @@ Available methods: `global_standardize` (recommended), `per_sample_minmax`, `per
 ### Single-waveform utilities
 
 - `normalize_waveform(waveform, scale_factor=1e21)` — multiply by a fixed scalar (useful for plotting; strain ~1e-21 → O(1))
-- `whiten_waveform(waveform, ...)` — PSD-based whitening using Welch + bandpass; returns `(whitened, psd_array, freqs)`
+- `whiten_waveform(waveform, ..., psd=None)` — PSD-based whitening + bandpass; returns `(whitened, psd_array, freqs)`. Pass `psd=` to bypass Welch estimation (recommended for simulated data — use the known generation PSD).
 - `resample_waveform(waveform, original_delta_t, target_delta_t, ...)` — anti-aliased resampling via PyCBC
 
 ### Correct whitening pipeline order
@@ -457,7 +467,8 @@ result['metadata'] = {
     'chunk_size':         int,
     'sky_params_provided':dict,
     'add_noise':          bool,
-    'preprocessing':      dict,             # empty by default
+    'noise_backend':      str,             # 'o4_psd' (default) or 'aligo' (debug only)
+    'preprocessing':      dict,             # empty by default; populated by whiten_dataloaders
 
     # MG only
     'm_g':                float,
@@ -556,7 +567,7 @@ Skipped automatically if the O4 PSD cache is missing.
 | `_M_OMEGA_PN` | 0.1 | PN breakdown: (m1+m2)·ω = 0.1 (geometric units) |
 | `_TAPER_FRACTION` | 0.50 | Phase taper: smooth to zero over top 50% of f_pn |
 | `delta_f` (workers) | 1/256 Hz | Hardcoded FD waveform frequency resolution |
-| `n_ringdown` | 500 samples | Ringdown window size in time-domain assembly |
+| `n_half` (assembly) | `target_length // 2` | Samples each side of coalescence (merger at centre) |
 | `_O4A_GPS_START` | 1369166418 | O4a run start (2023-05-24 18:00 UTC) |
 | `_O4A_GPS_END` | 1389744018 | O4a run end (2024-01-16 16:00 UTC) |
 | `_FETCH_DUR` | 256 s | Duration of each GWOSC data fetch |
