@@ -475,13 +475,20 @@ loaded = load_dataloaders('dataset.pt', batch_size=64)  # override batch size
 ```
 
 **What is saved** (via `torch.save`):
-- `X` — raw signal+noise tensor `(N, D, T)` float32
-- `X_whitened` — whitened + bandpassed (35–300 Hz, Tukey α=0.1) counterpart, same shape. Computed once at save time via `_whiten_batch`; not exposed by `load_dataloaders` — access with `torch.load(path, weights_only=False)["X_whitened"]`.
+- `X_whitened` — whitened + bandpassed (35–300 Hz, Tukey α=0.1) waveforms `(N, D, T)` float32. Computed once at save time via `_whiten_batch` and used as the training tensor by `load_dataloaders`. Access directly with `torch.load(path, weights_only=False)["X_whitened"]`.
 - `y` tensor (full dataset, not split)
 - `train_indices`, `val_indices`, `test_indices` — integer index lists
 - `metadata` dict
 
+The raw signal+noise tensor is held in memory while whitening but is **not** written to disk — this halves the on-disk footprint, since the training pipeline only ever consumes the whitened tensor anyway. `save_dataloaders` calls `os.makedirs(parent, exist_ok=True)` so writing to a not-yet-existing directory (e.g. `../Data/`) works without setup.
+
+**Default output path:** `generate_dataset.py` writes to `../Data/dataset.pt` — one level up from `Data Generation/`, in a sibling `Data/` folder that is created on demand.
+
 Loading reconstructs the exact same split using `torch.utils.data.Subset`. The tensor round-trip is exact (`torch.equal` passes). When `train_indices` is empty (e.g. real-data files saved with everything in test), `load_dataloaders` silently disables shuffle on the train loader so `DataLoader` does not trip `RandomSampler`'s non-empty requirement.
+
+**Downstream consumers of the old dual-tensor schema** (left unchanged — they KeyError on new files, still work on old):
+- `plot_waveforms.py` was updated to plot only the whitened tensor (single column), since raw is no longer saved.
+- `train_model_cpu.py` uses `X_whitened` when `use_whitened=True` (the project default); `use_whitened=False` now errors.
 
 ---
 
@@ -622,6 +629,35 @@ python reprocess_cached.py
 
 Output summary prints `Processed: N   Dropped: M` with the reason per dropped event. Typical yield on the O4 cache: 112 events kept, 8 dropped to NaN gaps.
 
+### Sky-coordinate time conversion — `sky_time_conversion.py`
+
+**File:** `HPC/Pipeline/Real Data/sky_time_conversion.py`
+**Purpose:** convert a model's RA prediction from the fixed training reference frame into the true celestial RA at a real event's GPS time. Stand-alone helper — not imported by the rest of the pipeline; apply manually at inference when you want sky positions in the event's own frame.
+
+**Why it's needed.** The simulated training data is generated at a single fixed GPS time (`1126259462.4`, GW150914), so a model trained on it predicts RA *in that frame* — the RA that would produce the observed waveform if the event had occurred at `t_ref`. Earth rotates between `t_ref` and any real event's `t_event`, so the true celestial RA differs by the sidereal angle swept in that interval. `dec` and `psi` are unaffected and pass through as-is.
+
+Antenna-pattern invariance guarantees that
+
+```
+(ra_hat, t_ref)  ↔  (ra_hat + omega_earth * (t_event - t_ref), t_event)
+```
+
+describe the same physical source. The module exposes one function implementing exactly that transform (mod 2π).
+
+**Public API:**
+
+```python
+from sky_time_conversion import ra_from_reference_time
+
+ra_hat, dec_hat, psi_hat = model_prediction        # in the training frame
+ra_true = ra_from_reference_time(ra_hat, t_event_gps)   # [rad], in [0, 2π)
+# (ra_true, dec_hat, psi_hat) = true celestial sky position at t_event.
+```
+
+Both `ra_hat` and `t_event` accept scalars or 1-D numpy arrays. The reference time can be overridden with the `t_ref` kwarg.
+
+**Tests:** `python sky_time_conversion.py` runs six checks, including that converting a perfect model's prediction recovers the ground-truth sky position to ~10⁻¹¹ rad in antenna-pattern space (50 random events spanning ±3 days of GPS offsets).
+
 ---
 
 ## Testing
@@ -689,3 +725,178 @@ Skipped automatically if the O4 PSD cache is missing.
 | `_M_SUN_SEC` | ~4.926×10⁻⁶ s | Solar mass in geometric units (G·M☉/c³) |
 | `_H0` | 67.4 km/s/Mpc | Hubble constant |
 | `_OMEGA_M` / `_OMEGA_LAMBDA` | 0.315 / 0.685 | Flat ΛCDM cosmological parameters |
+
+---
+
+# Training pipeline — `train_model_cpu.py` / `train_model_gpu.py`
+
+Two modules wrap the same DINGO training loop behind a single
+`run_training(config)` entry-point. The GPU variant shares model classes,
+data loading, and checkpoint-path logic with the CPU module to keep the
+two from drifting.
+
+## `DINGOModel` — top-level architecture
+
+```
+data (N, D, T) ──► EmbeddingNetwork ──► context (N, C) ──► NormalizingFlow ──► log p(θ|data)
+```
+
+Three embedding choices:
+
+| `embedding_type` | What it sees | Notable kwargs |
+|---|---|---|
+| `simple`  | per-detector flat MLP over T samples, then merge | `hidden_dim`, `share_detector_weights` |
+| `conv1d`  | single-channel conv stack over time-concatenated `(N, 1, D·T)` | `conv1d_num_filters=(64, 128, 256)` |
+| `lstm`    | per-detector stride-2 conv front-end → shared BiLSTM → merge | `lstm_hidden_dim`, `lstm_num_layers` |
+
+`DINGOModel(..., embedding_type, lstm_hidden_dim, lstm_num_layers, conv1d_num_filters)` threads
+the embedding-specific knobs into whichever module is selected — the others are silently ignored.
+
+## `run_training(config)` contract
+
+Both `train_model_cpu.run_training` and `train_model_gpu.run_training` take a single
+flat `config` dict, fall back to the module's `DEFAULT_CONFIG` for missing keys, and return:
+
+```python
+{
+    'best_log_prob':    float,   # val log-prob at the best epoch
+    'best_epoch':       int,
+    'epochs_completed': int,
+    'num_params':       int,
+    'elapsed_sec':      float,
+    'checkpoint_path':  str,     # where best state was persisted
+    'config':           dict,    # merged cfg actually used
+}
+```
+
+Every improvement in validation log-prob triggers a disk save to
+`checkpoint_path`, so a killed run still leaves the best state so far on disk.
+
+## `DEFAULT_CONFIG` keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dataset_path` | `'Data/dataset.pt'` | Input `.pt` file from `generate_dataset.py` |
+| `use_whitened` | `True` | Use `X_whitened` stream from dataset |
+| `merger_crop_half_width` | `500` | ±N samples around merger (`T//2`); `None` keeps full window |
+| `embedding_type` | `'lstm'` | `'simple' \| 'conv1d' \| 'lstm'` |
+| `context_dim` | `128` | Output dim of embedding; conditions the flow |
+| `num_flow_layers` | `4` | Affine coupling layers in `NormalizingFlow` |
+| `hidden_dim` | `64` | Flow MLP width (+ simple embedding width) |
+| `embedding_dropout` | `0.1` | Dropout inside simple / lstm embeddings |
+| `share_detector_weights` | `True` | Simple embedding: one MLP applied per detector |
+| `lstm_hidden_dim` | `128` | BiLSTM hidden size (lstm only) |
+| `lstm_num_layers` | `2` | BiLSTM depth (lstm only) |
+| `conv1d_num_filters` | `(64, 128, 256)` | Conv1D channel progression (conv1d only) |
+| `num_epochs` | `20` | Max epochs |
+| `batch_size` | `32` (CPU) / `128` (GPU) | Minibatch size |
+| `learning_rate` | `1e-4` | AdamW LR |
+| `weight_decay` | `1e-4` | AdamW weight decay |
+| `extra_patience_after_scheduler` | `3` | Early-stop grace after LR scheduler gives up (total patience = 6) |
+| `checkpoint_dir` | `'.'` | Output directory |
+| `device_tag` | `'cpu'` / `'gpu'` | Appended to checkpoint filename |
+| `checkpoint_tag` | `''` | Extra suffix (HP-run id) |
+| `resume_from` | `None` | Path to resume from (restores model/optim/scheduler/best) |
+| `seed` | `0` | RNG seed |
+
+GPU-only extras: `val_chunk_size` (128) and `compile_model` (False; enables
+`torch.compile(mode='reduce-overhead')` with try/except fallback).
+
+## Checkpoint filename convention
+
+`build_checkpoint_path(cfg, num_training_samples, add_noise)` produces:
+
+```
+dingo_N{samples}_F{num_flow_layers}_C{context_dim}_H{hidden_dim}_E{num_epochs}_{embedding_type}_crop{half_width}_{whitened|noisy|clean}_{tag}_{device_tag}.pt
+```
+
+Example: `dingo_N8k_F4_C128_H64_E20_lstm_crop500_whitened_hp007_gpu.pt`.
+
+## Resume-from-crash
+
+Pass `resume_from` pointing at a checkpoint produced by the same run. It
+restores `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`,
+`epochs_completed`, and `best_log_prob` / `best_state` so the LR scheduler
+and early-stop counter pick up where they left off.
+
+## GPU-specific optimisations (`train_model_gpu.py`)
+
+1. Whole dataset uploaded once to device (train + val tensors), then
+   indexed by `torch.randperm(..., device=device)` — no DataLoader overhead.
+2. `optimizer.zero_grad(set_to_none=True)`.
+3. Chunked validation forward pass via `_chunked_val_logprob` so val
+   batches stay bounded in memory regardless of val-set size.
+4. Optional `torch.compile(model, mode='reduce-overhead')` when
+   `compile_model=True`.
+
+---
+
+# Hyperparameter search — `hp_search.py`
+
+Cartesian-product grid search over `run_training(config)`. Edit the
+`SEARCH_SPACE` dict at the top of the file — each key is a `DEFAULT_CONFIG`
+key, each value is a list of candidate settings.
+
+## `SEARCH_SPACE` schema
+
+```python
+SEARCH_SPACE = {
+    'embedding_type':     ['simple', 'conv1d', 'lstm'],
+    'context_dim':        [64, 128],
+    'hidden_dim':         [64, 128],
+    'num_flow_layers':    [4, 6],
+    'lstm_hidden_dim':    [128],            # read only when embedding_type='lstm'
+    'lstm_num_layers':    [2],
+    'conv1d_num_filters': [(64, 128, 256)], # read only when embedding_type='conv1d'
+    'learning_rate':      [1e-4],
+    'batch_size':         [32],
+}
+
+COMMON_CONFIG = {   # shared across every run in the sweep
+    'dataset_path':           'Data/dataset.pt',
+    'merger_crop_half_width': 500,
+    'num_epochs':             20,
+    'seed':                   0,
+}
+```
+
+Embedding-specific knobs that don't apply to a given `embedding_type` are
+pruned out before the cartesian product is deduplicated — so picking
+`simple` with two different `lstm_hidden_dim` values yields **one** run,
+not two.
+
+## CLI
+
+```bash
+python hp_search.py                       # CPU trainer, full grid
+python hp_search.py --device gpu          # GPU trainer
+python hp_search.py --dry-run             # print planned combinations, don't train
+python hp_search.py --max-runs 4          # truncate sweep
+python hp_search.py --skip 10             # resume from combination #10
+python hp_search.py --tag run3            # prefix for checkpoint_tag (run3000, run3001, ...)
+python hp_search.py --results-csv my.csv  # custom output CSV
+```
+
+## Output CSV
+
+One row per trial, appended as soon as the trial finishes. Columns:
+
+```
+run_id, status, <every config key that varies>, best_log_prob, best_epoch,
+epochs_completed, num_params, elapsed_sec, checkpoint_path, error
+```
+
+`status ∈ {ok, failed, interrupted}`. Failed rows carry the exception
+type+message in `error` — the sweep continues past the failure.
+
+Tuples (e.g. `conv1d_num_filters=(64,128,256)`) are serialised as
+pipe-joined strings (`64|128|256`) so the CSV stays flat.
+
+## Typical workflow
+
+1. Edit `SEARCH_SPACE` + `COMMON_CONFIG` at top of `hp_search.py`.
+2. `python hp_search.py --dry-run` — sanity check the grid size.
+3. `python hp_search.py --device gpu` — run the sweep.
+4. Inspect `hp_search_results.csv`; rank by `best_log_prob`.
+5. Re-evaluate the top checkpoint(s) with `evaluate_model.py <ckpt>` and
+   `evaluate_real.py <ckpt>`.

@@ -1,0 +1,19 @@
+Real-data evaluation — 112 events, 5000 posterior samples each
+Checkpoint: dingo_N8k_F4_C128_H64_E20_conv1d_whitened_cpu.pt
+
+Mean per-event log-prob:
+  synthetic test :  -8.5246   (std 1.5378)
+  real events    :  -6.6265   (std 3.6826)
+
+Per-parameter residuals (catalogue − posterior mean) and z-scores:
+param          N      median Δ   median σ_post   median |z|   cov@68%   cov@95%
+mass1         73        -6.870          25.136        0.514     71.2%     97.3%
+mass2         73       -18.323          23.591        0.803     58.9%     95.9%
+distance      73       248.711        1922.726        0.536     80.8%     98.6%
+ra            73        -0.169           1.782        0.798     63.0%    100.0%
+dec           73         0.206           0.687        1.280     28.8%     93.2%
+
+Notes:
+  * catalogue chi_eff, inclination, coa_phase, polarization — no direct comparison here.
+  * per-event log-prob uses catalogue truth for matched params + posterior mean elsewhere;
+    this is a partial-truth proxy, lower than synthetic-test log-prob because truth is imperfect.

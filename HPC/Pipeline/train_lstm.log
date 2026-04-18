@@ -1,0 +1,42 @@
+PyTorch version: 2.9.1+cpu
+Device: cpu
+
+Loading dataset from: Data/dataset.pt
+  Train:          8000
+  Validation:     1000
+  Test:           1000
+  Data shape:     (N, 2, 8192)  (whitened)
+  Params:         ['mass1', 'mass2', 'spin1z', 'spin2z', 'distance', 'inclination', 'coa_phase', 'ra', 'dec', 'polarization', 'm_g', 'alpha_lv', 'A']
+
+Model will be saved as: dingo_N8k_F4_C128_H64_E20_lstm_whitened_cpu.pt
+
+Model:
+  PARAM_DIM=13  NUM_DETECTORS=2  SEQ_LEN=8192
+  CONTEXT_DIM=128  NUM_FLOW_LAYERS=4  HIDDEN_DIM=64  EMBEDDING=lstm
+
+Data stats:
+  train_params: min=-2.2819, max=2.2745, mean=-0.0000, std=0.8770
+  train_data:   min=-2222.6040, max=2416.2168, mean=-0.0008, std=19.7481
+
+Training for up to 20 epochs  (early-stop patience=10)
+  Samples: 8000
+  Batch size: 32
+  Learning rate: 0.0001
+  Weight decay: 0.0001
+
+Epoch   1/20, Train: -11.8329, Val: -11.0726, Best: -11.0726 @ ep1, Std: 1.4426, LR: 1.00e-04 *
+Epoch   2/20, Train: -11.0355, Val: -10.6188, Best: -10.6188 @ ep2, Std: 0.2770, LR: 1.00e-04 *
+Epoch   3/20, Train: -10.5580, Val: -10.3362, Best: -10.3362 @ ep3, Std: 0.2649, LR: 1.00e-04 *
+Epoch   4/20, Train: -10.1614, Val: -9.7489, Best: -9.7489 @ ep4, Std: 0.3535, LR: 1.00e-04 *
+Epoch   5/20, Train: -9.6792, Val: -9.5025, Best: -9.5025 @ ep5, Std: 0.2666, LR: 1.00e-04 *
+Epoch   6/20, Train: -9.5335, Val: -9.3836, Best: -9.3836 @ ep6, Std: 0.2671, LR: 1.00e-04 *
+Epoch   7/20, Train: -9.4589, Val: -9.3589, Best: -9.3589 @ ep7, Std: 0.2599, LR: 1.00e-04 *
+Epoch   8/20, Train: -9.4007, Val: -9.2834, Best: -9.2834 @ ep8, Std: 0.2425, LR: 1.00e-04 *
+Epoch   9/20, Train: -9.3357, Val: -9.1955, Best: -9.1955 @ ep9, Std: 0.2773, LR: 1.00e-04 *
+Epoch  10/20, Train: -9.2147, Val: -9.1186, Best: -9.1186 @ ep10, Std: 0.2646, LR: 1.00e-04 *
+Epoch  11/20, Train: -9.1841, Val: -9.0698, Best: -9.0698 @ ep11, Std: 0.2526, LR: 1.00e-04 *
+Epoch  12/20, Train: -9.1495, Val: -9.0618, Best: -9.0618 @ ep12, Std: 0.2520, LR: 1.00e-04 *
+Epoch  13/20, Train: -9.1140, Val: -9.0909, Best: -9.0618 @ ep12, Std: 0.2602, LR: 1.00e-04
+Epoch  14/20, Train: -9.1289, Val: -9.1656, Best: -9.0618 @ ep12, Std: 0.2521, LR: 1.00e-04
+Epoch  15/20, Train: -9.1248, Val: -8.9655, Best: -8.9655 @ ep15, Std: 0.2418, LR: 1.00e-04 *
+Epoch  16/20, Train: -9.0800, Val: -9.0796, Best: -8.9655 @ ep15, Std: 0.2750, LR: 1.00e-04
