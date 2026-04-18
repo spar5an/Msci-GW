@@ -29,7 +29,7 @@ from gw_datagen import (
 MODE = 'gr'
 
 NUM_SAMPLES  = 10000
-OUTPUT_PATH  = 'dataset.pt'
+OUTPUT_PATH  = '../Data/dataset.pt'
 ADD_NOISE    = True
 NUM_WORKERS  = 4
 
