@@ -303,10 +303,20 @@ class LSTMEmbeddingNetwork(nn.Module):
 
 
 class DINGOModel(nn.Module):
-    """observed_data -> EmbeddingNet -> context -> NormalizingFlow -> log p(params | data)"""
+    """observed_data -> EmbeddingNet -> context -> NormalizingFlow -> log p(params | data)
+
+    Embedding-specific knobs (optional; used only when the matching
+    ``embedding_type`` is selected):
+      * ``lstm_hidden_dim``, ``lstm_num_layers`` — BiLSTM width / depth.
+      * ``conv1d_num_filters`` — list of output channels for the Conv1D stack.
+    These default to the values that were previously hard-coded, so existing
+    checkpoints load unchanged.
+    """
     def __init__(self, num_detectors, seq_len, param_dim=1, context_dim=64,
                  num_flow_layers=6, hidden_dim=128, embedding_type='simple',
-                 embedding_dropout=0.1, share_detector_weights=True):
+                 embedding_dropout=0.1, share_detector_weights=True,
+                 lstm_hidden_dim=128, lstm_num_layers=2,
+                 conv1d_num_filters=(64, 128, 256)):
         super().__init__()
 
         self.embedding_type = embedding_type
@@ -316,12 +326,13 @@ class DINGOModel(nn.Module):
         if embedding_type == 'lstm':
             self.embedding_net = LSTMEmbeddingNetwork(
                 num_detectors=num_detectors, seq_len=seq_len, context_dim=context_dim,
-                hidden_dim=128, num_layers=2, dropout=embedding_dropout,
+                hidden_dim=lstm_hidden_dim, num_layers=lstm_num_layers,
+                dropout=embedding_dropout,
             )
         elif embedding_type == 'conv1d':
             self.embedding_net = Conv1DEmbeddingNetwork(
                 num_detectors=num_detectors, seq_len=seq_len, context_dim=context_dim,
-                num_filters=[64, 128, 256]
+                num_filters=list(conv1d_num_filters),
             )
         elif embedding_type == 'simple':
             self.embedding_net = SimpleEmbeddingNetwork(
@@ -391,7 +402,20 @@ def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None):
 
     raw = torch.load(path, weights_only=False)
 
+    # New datasets (post "saving only processed waveforms now") omit the raw
+    # 'X' key — they only store 'X_whitened'. Older dumps have both. We prefer
+    # whitened when available, and raise a clear error if raw strain is
+    # requested from a processed-only dump.
     X_key = 'X_whitened' if use_whitened else 'X'
+    if X_key not in raw:
+        if X_key == 'X' and 'X_whitened' in raw:
+            raise KeyError(
+                f"'{path}' contains only 'X_whitened' (new data-gen format). "
+                f"Re-run generate_dataset.py to include raw 'X' if you need "
+                f"use_whitened=False, or set use_whitened=True."
+            )
+        raise KeyError(f"'{path}' is missing required key '{X_key}'. "
+                       f"Found keys: {sorted(raw.keys())}")
     X = raw[X_key].float()      # (N, num_detectors, T)
     X = crop_to_merger(X, merger_crop_half_width)
     y = raw['y'].float()        # (N, P)
@@ -620,51 +644,107 @@ def train_dingo_model(model, train_params, train_data,
 
 
 # ==============================================================================
-# MAIN
+# CONFIG-DRIVEN ENTRY POINT
 # ==============================================================================
 
-if __name__ == '__main__':
-    # ----- Reproducibility -----
-    SEED = 0
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
+# All config keys accepted by `run_training`. Anything not present in the
+# caller's config falls back to these defaults. Keep this flat so the HP
+# search can sweep individual keys without knowing the nested schema.
+DEFAULT_CONFIG = {
+    # Data
+    'dataset_path':             'Data/dataset.pt',
+    'use_whitened':             True,
+    # ±N samples around the merger (index T//2); None keeps full window.
+    'merger_crop_half_width':   500,
 
-    # ----- Config -----
-    DATASET_PATH = 'Data/dataset.pt'    # produced by Data Generation/generate_dataset.py
-    USE_WHITENED = True
+    # Model — top-level knobs the HP search is expected to vary
+    'embedding_type':           'lstm',      # 'simple' | 'conv1d' | 'lstm'
+    'context_dim':              128,
+    'num_flow_layers':          4,
+    'hidden_dim':               64,
+    'embedding_dropout':        0.1,
+    'share_detector_weights':   True,
+    # Embedding-specific knobs (only used when the matching embedding is picked)
+    'lstm_hidden_dim':          128,
+    'lstm_num_layers':          2,
+    'conv1d_num_filters':       (64, 128, 256),
 
-    # Crop whitened strain to ±N samples around the merger (index T//2).
-    # Set to None to keep the full 8192-sample window; set to an int (e.g. 500)
-    # to train on a physics-relevant window of length 2*N. Applied to train/val/
-    # test and to real events at eval time.
-    MERGER_CROP_HALF_WIDTH = 500
+    # Training
+    'num_epochs':                   20,
+    'batch_size':                   32,
+    'learning_rate':                1e-4,
+    'weight_decay':                 1e-4,
+    # Halt `extra_patience_after_scheduler` epochs after LR scheduler (patience 3)
+    # gives up — so default total patience is 6 bad epochs in a row.
+    'extra_patience_after_scheduler': 3,
 
-    # Model (CPU-friendly defaults)
-    CONTEXT_DIM     = 128
-    NUM_FLOW_LAYERS = 4
-    HIDDEN_DIM      = 64
-    EMBEDDING_TYPE  = 'lstm'       # 'simple' | 'conv1d' | 'lstm'
+    # Output
+    'checkpoint_dir':           '.',
+    'device_tag':               'cpu',       # appended to checkpoint filename
+    'checkpoint_tag':           '',          # extra suffix (e.g. HP-run id)
+    'resume_from':              None,
+    'seed':                     0,
+}
 
-    # Training (CPU-friendly defaults)
-    NUM_EPOCHS    = 20
-    BATCH_SIZE    = 32
-    LEARNING_RATE = 1e-4
-    WEIGHT_DECAY  = 1e-4
-    # Early-stop: halt `EXTRA_PATIENCE_AFTER_SCHEDULER` epochs after the LR
-    # scheduler (patience=3) has already given up — so default total patience
-    # is scheduler.patience + 3 = 6 bad epochs in a row.
-    EXTRA_PATIENCE_AFTER_SCHEDULER = 3
 
-    # Set RESUME_FROM to a checkpoint path to continue training from it.
-    RESUME_FROM = None
+def _seed_everything(seed):
+    """Reseed Python, NumPy, and Torch. Override in GPU version for cuda seeds."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+
+def build_checkpoint_path(cfg, num_training_samples, add_noise):
+    """Compute the canonical save path from a config dict."""
+    samples_str = (f"{num_training_samples // 1000}k"
+                   if num_training_samples >= 1000 else str(num_training_samples))
+    if cfg['use_whitened']:
+        signal_tag = 'whitened'
+    else:
+        signal_tag = 'noisy' if add_noise else 'clean'
+    crop_tag = (f"_crop{cfg['merger_crop_half_width']}"
+                if cfg['merger_crop_half_width'] is not None else '')
+    tag = f"_{cfg['checkpoint_tag']}" if cfg['checkpoint_tag'] else ''
+    device_tag = f"_{cfg['device_tag']}" if cfg['device_tag'] else ''
+    fname = (f"dingo_N{samples_str}_F{cfg['num_flow_layers']}_C{cfg['context_dim']}"
+             f"_H{cfg['hidden_dim']}_E{cfg['num_epochs']}_{cfg['embedding_type']}"
+             f"{crop_tag}_{signal_tag}{tag}{device_tag}.pt")
+    return os.path.join(cfg['checkpoint_dir'], fname)
+
+
+def run_training(config=None, *, device=None, seed_fn=None):
+    """Run one training trial and return a summary dict.
+
+    Parameters
+    ----------
+    config : dict | None
+        Any subset of `DEFAULT_CONFIG`. Missing keys fall back to defaults.
+        Call sites can keep passing flat dicts — this is the contract the
+        HP search relies on.
+    device : torch.device | None
+        Override the module-level DEVICE (used by the GPU variant).
+    seed_fn : callable | None
+        Callable taking an int seed. Defaults to the CPU-safe
+        `_seed_everything`; GPU variant passes a cuda-aware one.
+
+    Returns
+    -------
+    dict
+        {best_log_prob, best_epoch, epochs_completed, num_params,
+         elapsed_sec, checkpoint_path, config}
+    """
+    import time
+    cfg = {**DEFAULT_CONFIG, **(config or {})}
+    dev = device if device is not None else DEVICE
+    (seed_fn or _seed_everything)(cfg['seed'])
 
     # ----- Load data -----
-    print(f"\nLoading dataset from: {DATASET_PATH}")
-    if MERGER_CROP_HALF_WIDTH is not None:
-        print(f"  Cropping strain to ±{MERGER_CROP_HALF_WIDTH} samples around merger "
-              f"(new T = {2 * MERGER_CROP_HALF_WIDTH})")
-    ds = load_dataset_pt(DATASET_PATH, use_whitened=USE_WHITENED,
-                         merger_crop_half_width=MERGER_CROP_HALF_WIDTH)
+    print(f"\nLoading dataset from: {cfg['dataset_path']}")
+    if cfg['merger_crop_half_width'] is not None:
+        print(f"  Cropping strain to ±{cfg['merger_crop_half_width']} samples around merger "
+              f"(new T = {2 * cfg['merger_crop_half_width']})")
+    ds = load_dataset_pt(cfg['dataset_path'],
+                         use_whitened=cfg['use_whitened'],
+                         merger_crop_half_width=cfg['merger_crop_half_width'])
 
     train_data,   train_params = ds['train_data'],   ds['train_params']
     val_data,     val_params   = ds['val_data'],     ds['val_params']
@@ -673,46 +753,44 @@ if __name__ == '__main__':
     param_names     = ds['param_names']
     metadata        = ds['metadata']
 
-    PARAM_DIM = len(param_names)
-    _, NUM_DETECTORS, SEQ_LEN = train_data.shape
-
-    print(f"  Train:          {len(train_params)}")
-    print(f"  Validation:     {len(val_params)}")
-    print(f"  Test:           {len(test_params)}")
-    print(f"  Data shape:     (N, {NUM_DETECTORS}, {SEQ_LEN})  ({'whitened' if USE_WHITENED else 'raw'})")
-    print(f"  Params:         {param_names}")
-
-    # ----- Model save path -----
+    param_dim = len(param_names)
+    _, num_detectors, seq_len = train_data.shape
     num_training_samples = len(train_params)
-    samples_str = f"{num_training_samples//1000}k" if num_training_samples >= 1000 else str(num_training_samples)
     add_noise = metadata.get('add_noise', True)
-    # Signal descriptor: whitening flattens the coloured noise, so "noisy"
-    # alongside "whitened" reads as a contradiction. Emit just one tag.
-    if USE_WHITENED:
-        signal_tag = "whitened"
-    else:
-        signal_tag = "noisy" if add_noise else "clean"
-    crop_tag = f"_crop{MERGER_CROP_HALF_WIDTH}" if MERGER_CROP_HALF_WIDTH is not None else ""
-    MODEL_SAVE_PATH = (
-        f"dingo_N{samples_str}_F{NUM_FLOW_LAYERS}_C{CONTEXT_DIM}_H{HIDDEN_DIM}"
-        f"_E{NUM_EPOCHS}_{EMBEDDING_TYPE}{crop_tag}_{signal_tag}_cpu.pt"
-    )
-    print(f"\nModel will be saved as: {MODEL_SAVE_PATH}")
+
+    print(f"  Train:      {len(train_params)}")
+    print(f"  Validation: {len(val_params)}")
+    print(f"  Test:       {len(test_params)}")
+    print(f"  Data shape: (N, {num_detectors}, {seq_len})  "
+          f"({'whitened' if cfg['use_whitened'] else 'raw'})")
+    print(f"  Params:     {param_names}")
+
+    # ----- Save path -----
+    save_path = build_checkpoint_path(cfg, num_training_samples, add_noise)
+    print(f"\nModel will be saved as: {save_path}")
 
     # ----- Build model -----
     print("\nModel:")
-    print(f"  PARAM_DIM={PARAM_DIM}  NUM_DETECTORS={NUM_DETECTORS}  SEQ_LEN={SEQ_LEN}")
-    print(f"  CONTEXT_DIM={CONTEXT_DIM}  NUM_FLOW_LAYERS={NUM_FLOW_LAYERS}  HIDDEN_DIM={HIDDEN_DIM}  EMBEDDING={EMBEDDING_TYPE}")
+    print(f"  PARAM_DIM={param_dim}  NUM_DETECTORS={num_detectors}  SEQ_LEN={seq_len}")
+    print(f"  CONTEXT_DIM={cfg['context_dim']}  NUM_FLOW_LAYERS={cfg['num_flow_layers']}  "
+          f"HIDDEN_DIM={cfg['hidden_dim']}  EMBEDDING={cfg['embedding_type']}")
 
     model = DINGOModel(
-        num_detectors=NUM_DETECTORS,
-        seq_len=SEQ_LEN,
-        param_dim=PARAM_DIM,
-        context_dim=CONTEXT_DIM,
-        num_flow_layers=NUM_FLOW_LAYERS,
-        hidden_dim=HIDDEN_DIM,
-        embedding_type=EMBEDDING_TYPE,
-    ).to(DEVICE)
+        num_detectors=num_detectors,
+        seq_len=seq_len,
+        param_dim=param_dim,
+        context_dim=cfg['context_dim'],
+        num_flow_layers=cfg['num_flow_layers'],
+        hidden_dim=cfg['hidden_dim'],
+        embedding_type=cfg['embedding_type'],
+        embedding_dropout=cfg['embedding_dropout'],
+        share_detector_weights=cfg['share_detector_weights'],
+        lstm_hidden_dim=cfg['lstm_hidden_dim'],
+        lstm_num_layers=cfg['lstm_num_layers'],
+        conv1d_num_filters=cfg['conv1d_num_filters'],
+    ).to(dev)
+
+    num_params = sum(p.numel() for p in model.parameters())
 
     # ----- Optional: resume from checkpoint -----
     optimizer_state_dict = None
@@ -722,9 +800,9 @@ if __name__ == '__main__':
     best_state_init = None
     best_epoch_init = 0
     bad_epochs_init = 0
-    if RESUME_FROM is not None:
-        print(f"\nResuming from checkpoint: {RESUME_FROM}")
-        ckpt = torch.load(RESUME_FROM, weights_only=False, map_location=DEVICE)
+    if cfg['resume_from'] is not None:
+        print(f"\nResuming from checkpoint: {cfg['resume_from']}")
+        ckpt = torch.load(cfg['resume_from'], weights_only=False, map_location=dev)
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer_state_dict = ckpt.get('optimizer_state_dict')
         scheduler_state_dict = ckpt.get('scheduler_state_dict')
@@ -736,40 +814,46 @@ if __name__ == '__main__':
         print(f"  Resumed @ epoch {start_epoch}, best_log_prob={best_log_prob_init}")
 
     # Metadata merged into every checkpoint written during training. The
-    # loop persists the best model on each improvement, so a killed run
-    # still leaves the best state so far on disk.
+    # training loop persists the best model on each improvement, so a
+    # killed run still leaves the best state so far on disk.
     checkpoint_extras = {
-        'param_norm_info': param_norm_info,
+        'param_norm_info':   param_norm_info,
         'model_param_names': param_names,
         'config': {
-            'num_detectors': NUM_DETECTORS,
-            'seq_len': SEQ_LEN,
-            'param_dim': PARAM_DIM,
-            'context_dim': CONTEXT_DIM,
-            'num_flow_layers': NUM_FLOW_LAYERS,
-            'hidden_dim': HIDDEN_DIM,
-            'embedding_type': EMBEDDING_TYPE,
-            'num_epochs': NUM_EPOCHS,
-            'batch_size': BATCH_SIZE,
-            'learning_rate': LEARNING_RATE,
-            'weight_decay': WEIGHT_DECAY,
-            'num_training_samples': num_training_samples,
-            'add_noise': add_noise,
-            'whiten': USE_WHITENED,
-            'merger_crop_half_width': MERGER_CROP_HALF_WIDTH,
-            'seed': SEED,
+            'num_detectors':          num_detectors,
+            'seq_len':                seq_len,
+            'param_dim':              param_dim,
+            'context_dim':            cfg['context_dim'],
+            'num_flow_layers':        cfg['num_flow_layers'],
+            'hidden_dim':             cfg['hidden_dim'],
+            'embedding_type':         cfg['embedding_type'],
+            'embedding_dropout':      cfg['embedding_dropout'],
+            'share_detector_weights': cfg['share_detector_weights'],
+            'lstm_hidden_dim':        cfg['lstm_hidden_dim'],
+            'lstm_num_layers':        cfg['lstm_num_layers'],
+            'conv1d_num_filters':     list(cfg['conv1d_num_filters']),
+            'num_epochs':             cfg['num_epochs'],
+            'batch_size':             cfg['batch_size'],
+            'learning_rate':          cfg['learning_rate'],
+            'weight_decay':           cfg['weight_decay'],
+            'num_training_samples':   num_training_samples,
+            'add_noise':              add_noise,
+            'whiten':                 cfg['use_whitened'],
+            'merger_crop_half_width': cfg['merger_crop_half_width'],
+            'seed':                   cfg['seed'],
         },
     }
 
     # ----- Train -----
+    t0 = time.time()
     (losses, val_losses, best_state, best_log_prob, best_epoch,
      optimizer, scheduler, bad_epochs) = train_dingo_model(
         model, train_params, train_data,
-        num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
+        num_epochs=cfg['num_epochs'], batch_size=cfg['batch_size'],
+        lr=cfg['learning_rate'], weight_decay=cfg['weight_decay'],
         val_params=val_params, val_data=val_data,
-        extra_patience_after_scheduler=EXTRA_PATIENCE_AFTER_SCHEDULER,
-        checkpoint_path=MODEL_SAVE_PATH,
+        extra_patience_after_scheduler=cfg['extra_patience_after_scheduler'],
+        checkpoint_path=save_path,
         checkpoint_extras=checkpoint_extras,
         optimizer_state_dict=optimizer_state_dict,
         scheduler_state_dict=scheduler_state_dict,
@@ -779,6 +863,38 @@ if __name__ == '__main__':
         best_epoch_init=best_epoch_init,
         bad_epochs_init=bad_epochs_init,
     )
+    elapsed = time.time() - t0
 
-    print(f"\nBest model (epoch {best_epoch}) saved to: {MODEL_SAVE_PATH}")
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"\nBest model (epoch {best_epoch}) saved to: {save_path}")
+    print(f"Total parameters: {num_params:,}   Wall-clock: {elapsed:.1f}s")
+
+    return {
+        'best_log_prob':     float(best_log_prob),
+        'best_epoch':        int(best_epoch),
+        'epochs_completed':  start_epoch + len(losses),
+        'num_params':        int(num_params),
+        'elapsed_sec':       float(elapsed),
+        'checkpoint_path':   save_path,
+        'config':            cfg,
+    }
+
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+
+if __name__ == '__main__':
+    # Edit here to run a single training job. For a sweep across model
+    # types / sizes / depths, use hp_search.py instead.
+    run_training({
+        'dataset_path':           'Data/dataset.pt',
+        'merger_crop_half_width': 500,
+        'embedding_type':         'lstm',
+        'context_dim':            128,
+        'num_flow_layers':        4,
+        'hidden_dim':             64,
+        'num_epochs':             20,
+        'batch_size':             32,
+        'learning_rate':          1e-4,
+        'device_tag':             'cpu',
+    })

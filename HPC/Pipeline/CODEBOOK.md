@@ -725,3 +725,178 @@ Skipped automatically if the O4 PSD cache is missing.
 | `_M_SUN_SEC` | ~4.926×10⁻⁶ s | Solar mass in geometric units (G·M☉/c³) |
 | `_H0` | 67.4 km/s/Mpc | Hubble constant |
 | `_OMEGA_M` / `_OMEGA_LAMBDA` | 0.315 / 0.685 | Flat ΛCDM cosmological parameters |
+
+---
+
+# Training pipeline — `train_model_cpu.py` / `train_model_gpu.py`
+
+Two modules wrap the same DINGO training loop behind a single
+`run_training(config)` entry-point. The GPU variant shares model classes,
+data loading, and checkpoint-path logic with the CPU module to keep the
+two from drifting.
+
+## `DINGOModel` — top-level architecture
+
+```
+data (N, D, T) ──► EmbeddingNetwork ──► context (N, C) ──► NormalizingFlow ──► log p(θ|data)
+```
+
+Three embedding choices:
+
+| `embedding_type` | What it sees | Notable kwargs |
+|---|---|---|
+| `simple`  | per-detector flat MLP over T samples, then merge | `hidden_dim`, `share_detector_weights` |
+| `conv1d`  | single-channel conv stack over time-concatenated `(N, 1, D·T)` | `conv1d_num_filters=(64, 128, 256)` |
+| `lstm`    | per-detector stride-2 conv front-end → shared BiLSTM → merge | `lstm_hidden_dim`, `lstm_num_layers` |
+
+`DINGOModel(..., embedding_type, lstm_hidden_dim, lstm_num_layers, conv1d_num_filters)` threads
+the embedding-specific knobs into whichever module is selected — the others are silently ignored.
+
+## `run_training(config)` contract
+
+Both `train_model_cpu.run_training` and `train_model_gpu.run_training` take a single
+flat `config` dict, fall back to the module's `DEFAULT_CONFIG` for missing keys, and return:
+
+```python
+{
+    'best_log_prob':    float,   # val log-prob at the best epoch
+    'best_epoch':       int,
+    'epochs_completed': int,
+    'num_params':       int,
+    'elapsed_sec':      float,
+    'checkpoint_path':  str,     # where best state was persisted
+    'config':           dict,    # merged cfg actually used
+}
+```
+
+Every improvement in validation log-prob triggers a disk save to
+`checkpoint_path`, so a killed run still leaves the best state so far on disk.
+
+## `DEFAULT_CONFIG` keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dataset_path` | `'Data/dataset.pt'` | Input `.pt` file from `generate_dataset.py` |
+| `use_whitened` | `True` | Use `X_whitened` stream from dataset |
+| `merger_crop_half_width` | `500` | ±N samples around merger (`T//2`); `None` keeps full window |
+| `embedding_type` | `'lstm'` | `'simple' \| 'conv1d' \| 'lstm'` |
+| `context_dim` | `128` | Output dim of embedding; conditions the flow |
+| `num_flow_layers` | `4` | Affine coupling layers in `NormalizingFlow` |
+| `hidden_dim` | `64` | Flow MLP width (+ simple embedding width) |
+| `embedding_dropout` | `0.1` | Dropout inside simple / lstm embeddings |
+| `share_detector_weights` | `True` | Simple embedding: one MLP applied per detector |
+| `lstm_hidden_dim` | `128` | BiLSTM hidden size (lstm only) |
+| `lstm_num_layers` | `2` | BiLSTM depth (lstm only) |
+| `conv1d_num_filters` | `(64, 128, 256)` | Conv1D channel progression (conv1d only) |
+| `num_epochs` | `20` | Max epochs |
+| `batch_size` | `32` (CPU) / `128` (GPU) | Minibatch size |
+| `learning_rate` | `1e-4` | AdamW LR |
+| `weight_decay` | `1e-4` | AdamW weight decay |
+| `extra_patience_after_scheduler` | `3` | Early-stop grace after LR scheduler gives up (total patience = 6) |
+| `checkpoint_dir` | `'.'` | Output directory |
+| `device_tag` | `'cpu'` / `'gpu'` | Appended to checkpoint filename |
+| `checkpoint_tag` | `''` | Extra suffix (HP-run id) |
+| `resume_from` | `None` | Path to resume from (restores model/optim/scheduler/best) |
+| `seed` | `0` | RNG seed |
+
+GPU-only extras: `val_chunk_size` (128) and `compile_model` (False; enables
+`torch.compile(mode='reduce-overhead')` with try/except fallback).
+
+## Checkpoint filename convention
+
+`build_checkpoint_path(cfg, num_training_samples, add_noise)` produces:
+
+```
+dingo_N{samples}_F{num_flow_layers}_C{context_dim}_H{hidden_dim}_E{num_epochs}_{embedding_type}_crop{half_width}_{whitened|noisy|clean}_{tag}_{device_tag}.pt
+```
+
+Example: `dingo_N8k_F4_C128_H64_E20_lstm_crop500_whitened_hp007_gpu.pt`.
+
+## Resume-from-crash
+
+Pass `resume_from` pointing at a checkpoint produced by the same run. It
+restores `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`,
+`epochs_completed`, and `best_log_prob` / `best_state` so the LR scheduler
+and early-stop counter pick up where they left off.
+
+## GPU-specific optimisations (`train_model_gpu.py`)
+
+1. Whole dataset uploaded once to device (train + val tensors), then
+   indexed by `torch.randperm(..., device=device)` — no DataLoader overhead.
+2. `optimizer.zero_grad(set_to_none=True)`.
+3. Chunked validation forward pass via `_chunked_val_logprob` so val
+   batches stay bounded in memory regardless of val-set size.
+4. Optional `torch.compile(model, mode='reduce-overhead')` when
+   `compile_model=True`.
+
+---
+
+# Hyperparameter search — `hp_search.py`
+
+Cartesian-product grid search over `run_training(config)`. Edit the
+`SEARCH_SPACE` dict at the top of the file — each key is a `DEFAULT_CONFIG`
+key, each value is a list of candidate settings.
+
+## `SEARCH_SPACE` schema
+
+```python
+SEARCH_SPACE = {
+    'embedding_type':     ['simple', 'conv1d', 'lstm'],
+    'context_dim':        [64, 128],
+    'hidden_dim':         [64, 128],
+    'num_flow_layers':    [4, 6],
+    'lstm_hidden_dim':    [128],            # read only when embedding_type='lstm'
+    'lstm_num_layers':    [2],
+    'conv1d_num_filters': [(64, 128, 256)], # read only when embedding_type='conv1d'
+    'learning_rate':      [1e-4],
+    'batch_size':         [32],
+}
+
+COMMON_CONFIG = {   # shared across every run in the sweep
+    'dataset_path':           'Data/dataset.pt',
+    'merger_crop_half_width': 500,
+    'num_epochs':             20,
+    'seed':                   0,
+}
+```
+
+Embedding-specific knobs that don't apply to a given `embedding_type` are
+pruned out before the cartesian product is deduplicated — so picking
+`simple` with two different `lstm_hidden_dim` values yields **one** run,
+not two.
+
+## CLI
+
+```bash
+python hp_search.py                       # CPU trainer, full grid
+python hp_search.py --device gpu          # GPU trainer
+python hp_search.py --dry-run             # print planned combinations, don't train
+python hp_search.py --max-runs 4          # truncate sweep
+python hp_search.py --skip 10             # resume from combination #10
+python hp_search.py --tag run3            # prefix for checkpoint_tag (run3000, run3001, ...)
+python hp_search.py --results-csv my.csv  # custom output CSV
+```
+
+## Output CSV
+
+One row per trial, appended as soon as the trial finishes. Columns:
+
+```
+run_id, status, <every config key that varies>, best_log_prob, best_epoch,
+epochs_completed, num_params, elapsed_sec, checkpoint_path, error
+```
+
+`status ∈ {ok, failed, interrupted}`. Failed rows carry the exception
+type+message in `error` — the sweep continues past the failure.
+
+Tuples (e.g. `conv1d_num_filters=(64,128,256)`) are serialised as
+pipe-joined strings (`64|128|256`) so the CSV stays flat.
+
+## Typical workflow
+
+1. Edit `SEARCH_SPACE` + `COMMON_CONFIG` at top of `hp_search.py`.
+2. `python hp_search.py --dry-run` — sanity check the grid size.
+3. `python hp_search.py --device gpu` — run the sweep.
+4. Inspect `hp_search_results.csv`; rank by `best_log_prob`.
+5. Re-evaluate the top checkpoint(s) with `evaluate_model.py <ckpt>` and
+   `evaluate_real.py <ckpt>`.
