@@ -2369,9 +2369,9 @@ def save_dataloaders(result: Dict, save_path: str) -> None:
     """
     Save the datasets from a pycbc_data_generator result.
 
-    Saves both the raw (signal + coloured noise) waveforms as ``X`` and a
-    whitened + bandpassed version as ``X_whitened``, using the same whitening
-    settings as the real-data pipeline.
+    Saves only the whitened + bandpassed waveforms as ``X_whitened``, using the
+    same whitening settings as the real-data pipeline. The raw signal+noise
+    tensor is generated in memory for whitening but not written to disk.
 
     Parameters
     ----------
@@ -2404,12 +2404,14 @@ def save_dataloaders(result: Dict, save_path: str) -> None:
         'train_indices': train_dataset.indices,
         'val_indices': val_dataset.indices,
         'test_indices': test_dataset.indices,
-        'X': X,
         'X_whitened': X_whitened,
         'y': y,
         'metadata': result['metadata']
     }
 
+    parent = os.path.dirname(save_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     torch.save(save_data, save_path)
     print(f"  Saved successfully!")
 
@@ -2441,7 +2443,7 @@ def load_dataloaders(load_path: str, batch_size: int = None, shuffle_train: bool
 
     save_data = torch.load(load_path, weights_only=False)
 
-    X = save_data['X']
+    X = save_data['X_whitened']
     y = save_data['y']
     train_indices = save_data['train_indices']
     val_indices = save_data['val_indices']
