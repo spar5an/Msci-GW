@@ -475,13 +475,20 @@ loaded = load_dataloaders('dataset.pt', batch_size=64)  # override batch size
 ```
 
 **What is saved** (via `torch.save`):
-- `X` — raw signal+noise tensor `(N, D, T)` float32
-- `X_whitened` — whitened + bandpassed (35–300 Hz, Tukey α=0.1) counterpart, same shape. Computed once at save time via `_whiten_batch`; not exposed by `load_dataloaders` — access with `torch.load(path, weights_only=False)["X_whitened"]`.
+- `X_whitened` — whitened + bandpassed (35–300 Hz, Tukey α=0.1) waveforms `(N, D, T)` float32. Computed once at save time via `_whiten_batch` and used as the training tensor by `load_dataloaders`. Access directly with `torch.load(path, weights_only=False)["X_whitened"]`.
 - `y` tensor (full dataset, not split)
 - `train_indices`, `val_indices`, `test_indices` — integer index lists
 - `metadata` dict
 
+The raw signal+noise tensor is held in memory while whitening but is **not** written to disk — this halves the on-disk footprint, since the training pipeline only ever consumes the whitened tensor anyway. `save_dataloaders` calls `os.makedirs(parent, exist_ok=True)` so writing to a not-yet-existing directory (e.g. `../Data/`) works without setup.
+
+**Default output path:** `generate_dataset.py` writes to `../Data/dataset.pt` — one level up from `Data Generation/`, in a sibling `Data/` folder that is created on demand.
+
 Loading reconstructs the exact same split using `torch.utils.data.Subset`. The tensor round-trip is exact (`torch.equal` passes). When `train_indices` is empty (e.g. real-data files saved with everything in test), `load_dataloaders` silently disables shuffle on the train loader so `DataLoader` does not trip `RandomSampler`'s non-empty requirement.
+
+**Downstream consumers of the old dual-tensor schema** (left unchanged — they KeyError on new files, still work on old):
+- `plot_waveforms.py` was updated to plot only the whitened tensor (single column), since raw is no longer saved.
+- `train_model_cpu.py` uses `X_whitened` when `use_whitened=True` (the project default); `use_whitened=False` now errors.
 
 ---
 
@@ -621,6 +628,35 @@ python reprocess_cached.py
 ```
 
 Output summary prints `Processed: N   Dropped: M` with the reason per dropped event. Typical yield on the O4 cache: 112 events kept, 8 dropped to NaN gaps.
+
+### Sky-coordinate time conversion — `sky_time_conversion.py`
+
+**File:** `HPC/Pipeline/Real Data/sky_time_conversion.py`
+**Purpose:** convert a model's RA prediction from the fixed training reference frame into the true celestial RA at a real event's GPS time. Stand-alone helper — not imported by the rest of the pipeline; apply manually at inference when you want sky positions in the event's own frame.
+
+**Why it's needed.** The simulated training data is generated at a single fixed GPS time (`1126259462.4`, GW150914), so a model trained on it predicts RA *in that frame* — the RA that would produce the observed waveform if the event had occurred at `t_ref`. Earth rotates between `t_ref` and any real event's `t_event`, so the true celestial RA differs by the sidereal angle swept in that interval. `dec` and `psi` are unaffected and pass through as-is.
+
+Antenna-pattern invariance guarantees that
+
+```
+(ra_hat, t_ref)  ↔  (ra_hat + omega_earth * (t_event - t_ref), t_event)
+```
+
+describe the same physical source. The module exposes one function implementing exactly that transform (mod 2π).
+
+**Public API:**
+
+```python
+from sky_time_conversion import ra_from_reference_time
+
+ra_hat, dec_hat, psi_hat = model_prediction        # in the training frame
+ra_true = ra_from_reference_time(ra_hat, t_event_gps)   # [rad], in [0, 2π)
+# (ra_true, dec_hat, psi_hat) = true celestial sky position at t_event.
+```
+
+Both `ra_hat` and `t_event` accept scalars or 1-D numpy arrays. The reference time can be overridden with the `t_ref` kwarg.
+
+**Tests:** `python sky_time_conversion.py` runs six checks, including that converting a perfect model's prediction recovers the ground-truth sky position to ~10⁻¹¹ rad in antenna-pattern space (50 random events spanning ±3 days of GPS offsets).
 
 ---
 
