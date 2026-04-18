@@ -1,0 +1,51 @@
+PyTorch version: 2.9.1+cpu
+Device: cpu
+
+Loading dataset from: Data/dataset.pt
+  Train:          8000
+  Validation:     1000
+  Test:           1000
+  Data shape:     (N, 2, 8192)  (whitened)
+  Params:         ['mass1', 'mass2', 'spin1z', 'spin2z', 'distance', 'inclination', 'coa_phase', 'ra', 'dec', 'polarization', 'm_g', 'alpha_lv', 'A']
+
+Model will be saved as: dingo_N8k_F4_C128_H64_E20_conv1d_whitened_cpu.pt
+
+Model:
+  PARAM_DIM=13  NUM_DETECTORS=2  SEQ_LEN=8192
+  CONTEXT_DIM=128  NUM_FLOW_LAYERS=4  HIDDEN_DIM=64  EMBEDDING=conv1d
+
+Data stats:
+  train_params: min=-2.2819, max=2.2745, mean=-0.0000, std=0.8770
+  train_data:   min=-2222.6040, max=2416.2168, mean=-0.0008, std=19.7481
+
+Training for up to 20 epochs  (early-stop patience=10)
+  Samples: 8000
+  Batch size: 32
+  Learning rate: 0.0001
+  Weight decay: 0.0001
+
+Epoch   1/20, Train: -11.7877, Val: -10.9079, Best: -10.9079 @ ep1, Std: 1.3705, LR: 1.00e-04 *
+Epoch   2/20, Train: -10.8490, Val: -11.7021, Best: -10.9079 @ ep1, Std: 0.2838, LR: 1.00e-04
+Epoch   3/20, Train: -10.6718, Val: -10.4671, Best: -10.4671 @ ep3, Std: 0.3002, LR: 1.00e-04 *
+Epoch   4/20, Train: -10.0985, Val: -9.5311, Best: -9.5311 @ ep4, Std: 0.3849, LR: 1.00e-04 *
+Epoch   5/20, Train: -9.5120, Val: -9.6409, Best: -9.5311 @ ep4, Std: 0.2744, LR: 1.00e-04
+Epoch   6/20, Train: -9.3344, Val: -9.1978, Best: -9.1978 @ ep6, Std: 0.2910, LR: 1.00e-04 *
+Epoch   7/20, Train: -9.2058, Val: -9.0898, Best: -9.0898 @ ep7, Std: 0.2824, LR: 1.00e-04 *
+Epoch   8/20, Train: -9.1278, Val: -9.1710, Best: -9.0898 @ ep7, Std: 0.2840, LR: 1.00e-04
+Epoch   9/20, Train: -9.0472, Val: -9.0605, Best: -9.0605 @ ep9, Std: 0.2809, LR: 1.00e-04 *
+Epoch  10/20, Train: -8.9732, Val: -8.8463, Best: -8.8463 @ ep10, Std: 0.2617, LR: 1.00e-04 *
+Epoch  11/20, Train: -8.9159, Val: -9.0243, Best: -8.8463 @ ep10, Std: 0.2970, LR: 1.00e-04
+Epoch  12/20, Train: -8.8262, Val: -8.8361, Best: -8.8361 @ ep12, Std: 0.2891, LR: 1.00e-04 *
+Epoch  13/20, Train: -8.7807, Val: -8.8211, Best: -8.8211 @ ep13, Std: 0.3147, LR: 1.00e-04 *
+Epoch  14/20, Train: -8.6723, Val: -8.7659, Best: -8.7659 @ ep14, Std: 0.3003, LR: 1.00e-04 *
+Epoch  15/20, Train: -8.6324, Val: -8.7888, Best: -8.7659 @ ep14, Std: 0.2886, LR: 1.00e-04
+Epoch  16/20, Train: -8.5485, Val: -8.9945, Best: -8.7659 @ ep14, Std: 0.3157, LR: 1.00e-04
+Epoch  17/20, Train: -8.5162, Val: -8.9117, Best: -8.7659 @ ep14, Std: 0.3112, LR: 1.00e-04
+Epoch  18/20, Train: -8.4445, Val: -8.7313, Best: -8.7313 @ ep18, Std: 0.3322, LR: 1.00e-04 *
+Epoch  19/20, Train: -8.4161, Val: -8.3664, Best: -8.3664 @ ep19, Std: 0.3096, LR: 1.00e-04 *
+Epoch  20/20, Train: -8.2167, Val: -8.6794, Best: -8.3664 @ ep19, Std: 0.2624, LR: 1.00e-04
+
+Training complete. Best log-prob: -8.3664 (epoch 19).
+
+Saved best model (epoch 19) to: dingo_N8k_F4_C128_H64_E20_conv1d_whitened_cpu.pt
+Total parameters: 864,744

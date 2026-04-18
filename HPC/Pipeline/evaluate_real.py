@@ -24,6 +24,7 @@
 import csv
 import math
 import re
+import sys
 from pathlib import Path
 
 import corner
@@ -32,7 +33,7 @@ import numpy as np
 import torch
 from scipy import stats
 
-from train_model_cpu import DINGOModel, load_dataset_pt
+from train_model_cpu import DINGOModel, crop_to_merger, load_dataset_pt
 
 
 DEVICE = torch.device('cpu')
@@ -42,11 +43,18 @@ DEVICE = torch.device('cpu')
 # Config
 # ---------------------------------------------------------------------------
 
-CHECKPOINT   = 'dingo_N8k_F4_C128_H64_E20_simple_whitened_cpu.pt'
+CHECKPOINT   = 'dingo_N8k_F4_C128_H64_E20_conv1d_whitened_cpu.pt'
+if len(sys.argv) > 1:
+    CHECKPOINT = sys.argv[1]
 SYN_DATASET  = 'Data/dataset.pt'
 REAL_DATA_PT = 'Real Data/pt/o4_all_events_2s_real.pt'
 CSV_PATH     = 'gw_events_stats.csv'
-PLOT_DIR     = Path('plots')
+_embedding_stem = next(
+    (tag for tag in ('simple', 'conv1d', 'lstm') if tag in Path(CHECKPOINT).stem),
+    'misc',
+)
+PLOT_DIR     = Path('plots') / _embedding_stem
+PLOT_DIR.mkdir(parents=True, exist_ok=True)
 NUM_SAMPLES  = 5000
 CORNER_EVENTS = ['GW150914', 'GW230628_231200', 'GW230820_212515', 'GW250114_082203']
 
@@ -283,7 +291,14 @@ def main():
     print(f"  best log-prob @ ep{ckpt.get('best_epoch')}: {ckpt.get('best_log_prob'):.4f}")
 
     # --- synthetic dataset (for param_norm_info) ---
-    syn = load_dataset_pt(SYN_DATASET, use_whitened=ckpt['config'].get('whiten', True))
+    crop_hw = ckpt['config'].get('merger_crop_half_width')
+    if crop_hw is not None:
+        print(f"Applying merger crop ±{crop_hw} samples (from checkpoint config)")
+    syn = load_dataset_pt(
+        SYN_DATASET,
+        use_whitened=ckpt['config'].get('whiten', True),
+        merger_crop_half_width=crop_hw,
+    )
     param_names = syn['param_names']
     param_norm_info = syn['param_norm_info']
 
@@ -291,6 +306,7 @@ def main():
     print(f"Loading real data: {REAL_DATA_PT}")
     real = torch.load(REAL_DATA_PT, weights_only=False)
     X_real_w = real['X_whitened'].float()  # (N_real, 2, 8192)
+    X_real_w = crop_to_merger(X_real_w, crop_hw)
     event_names = list(real['metadata']['events'])
     N_real = X_real_w.shape[0]
     print(f"  {N_real} events, data shape {tuple(X_real_w.shape)}")

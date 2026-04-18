@@ -196,8 +196,14 @@ class SimpleEmbeddingNetwork(nn.Module):
 
 
 class Conv1DEmbeddingNetwork(nn.Module):
-    """1D CNN over the detector channels (in_channels = num_detectors)."""
-    def __init__(self, num_detectors, seq_len, context_dim=512, num_filters=None):
+    """1D CNN over detector strains concatenated along the time axis.
+
+    Input (N, D, T) is reshaped to (N, 1, D*T) so convolutions operate on one
+    long single-channel sequence (e.g. 2 * 8192 = 16384 samples) rather than
+    receiving detectors as separate input channels.
+    """
+    def __init__(self, num_detectors, seq_len, context_dim=128, num_filters=None,
+                 dropout=0.1):
         super().__init__()
         if num_filters is None:
             num_filters = [64, 128, 256]
@@ -205,88 +211,95 @@ class Conv1DEmbeddingNetwork(nn.Module):
         self.seq_len = seq_len
         self.context_dim = context_dim
 
-        self.conv1 = nn.Sequential(
-            nn.Conv1d(num_detectors, num_filters[0], kernel_size=15, stride=2, padding=7),
-            nn.BatchNorm1d(num_filters[0]),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv1d(num_filters[0], num_filters[1], kernel_size=15, stride=2, padding=7),
-            nn.BatchNorm1d(num_filters[1]),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        self.conv3 = nn.Sequential(
-            nn.Conv1d(num_filters[1], num_filters[2], kernel_size=15, stride=2, padding=7),
-            nn.BatchNorm1d(num_filters[2]),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
+        def block(in_c, out_c):
+            return nn.Sequential(
+                nn.Conv1d(in_c, out_c, kernel_size=15, stride=2, padding=7),
+                nn.BatchNorm1d(out_c),
+                nn.ReLU(),
+                nn.MaxPool1d(kernel_size=2, stride=2),
+            )
+
+        in_channels = [1] + list(num_filters[:-1])
+        self.conv_stack = nn.Sequential(
+            *[block(ic, oc) for ic, oc in zip(in_channels, num_filters)]
         )
 
         self.global_pool = nn.AdaptiveAvgPool1d(1)
 
         self.fc = nn.Sequential(
-            nn.Linear(num_filters[2], 512),
+            nn.Linear(num_filters[-1], 256),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, context_dim),
-            nn.LayerNorm(context_dim)
+            nn.Dropout(dropout),
+            nn.Linear(256, context_dim),
+            nn.LayerNorm(context_dim),
         )
 
     def forward(self, data):
-        # data: (N, D, T)
-        x = self.conv1(data)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.global_pool(x)
-        x = x.view(x.size(0), -1)
+        # data: (N, D, T) -> (N, 1, D*T)
+        N, D, T = data.shape
+        x = data.reshape(N, 1, D * T)
+        x = self.conv_stack(x)
+        x = self.global_pool(x).view(N, -1)
         return self.fc(x)
 
 
 class LSTMEmbeddingNetwork(nn.Module):
-    """BiLSTM with per-timestep detector-vector input."""
-    def __init__(self, num_detectors, seq_len, context_dim=512, hidden_dim=256, num_layers=2):
+    """Per-detector 1-D conv down-sampler → shared BiLSTM → merge.
+
+    Each detector's whitened strain (N, 1, T) passes through a stride-2 conv
+    stack that shrinks 8192 → ~1024 steps at `conv_channels[-1]` features.
+    Both detectors are then fed through THE SAME BiLSTM (shared weights).
+    The two detectors' final hidden states are concatenated and projected
+    to `context_dim`.
+    """
+    def __init__(self, num_detectors, seq_len, context_dim=128, hidden_dim=128,
+                 num_layers=2, conv_channels=(16, 32, 64), dropout=0.1):
         super().__init__()
         self.num_detectors = num_detectors
         self.seq_len = seq_len
-        self.context_dim = context_dim
         self.hidden_dim = hidden_dim
 
-        self.input_proj = nn.Sequential(
-            nn.Linear(num_detectors, 32),
-            nn.ReLU()
-        )
+        layers, in_c = [], 1
+        for out_c in conv_channels:
+            layers += [
+                nn.Conv1d(in_c, out_c, kernel_size=15, stride=2, padding=7),
+                nn.BatchNorm1d(out_c),
+                nn.ReLU(),
+            ]
+            in_c = out_c
+        self.conv_front = nn.Sequential(*layers)
+        self._feat_dim = conv_channels[-1]
 
         self.lstm = nn.LSTM(
-            input_size=32,
+            input_size=self._feat_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
             bidirectional=True,
-            dropout=0.1 if num_layers > 1 else 0
+            dropout=dropout if num_layers > 1 else 0.0,
         )
 
+        merge_in = num_detectors * hidden_dim * 2
         self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 512),
+            nn.Linear(merge_in, 256),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, context_dim),
-            nn.LayerNorm(context_dim)
+            nn.Dropout(dropout),
+            nn.Linear(256, context_dim),
+            nn.LayerNorm(context_dim),
         )
 
     def forward(self, data):
-        # data: (N, D, T) -> (N, T, D)
-        x = data.transpose(1, 2)
-        x = self.input_proj(x)
+        # data: (N, D, T)
+        N, D, T = data.shape
+        x = data.reshape(N * D, 1, T)
+        x = self.conv_front(x)
+        x = x.transpose(1, 2)
         _, (h_n, _) = self.lstm(x)
-        h_forward = h_n[-2, :, :]
-        h_backward = h_n[-1, :, :]
-        final_state = torch.cat([h_forward, h_backward], dim=1)
-        return self.output_proj(final_state)
+        h_fwd = h_n[-2]
+        h_bwd = h_n[-1]
+        h = torch.cat([h_fwd, h_bwd], dim=1)
+        h = h.reshape(N, D * h.shape[-1])
+        return self.output_proj(h)
 
 
 class DINGOModel(nn.Module):
@@ -303,7 +316,7 @@ class DINGOModel(nn.Module):
         if embedding_type == 'lstm':
             self.embedding_net = LSTMEmbeddingNetwork(
                 num_detectors=num_detectors, seq_len=seq_len, context_dim=context_dim,
-                hidden_dim=256, num_layers=2
+                hidden_dim=128, num_layers=2, dropout=embedding_dropout,
             )
         elif embedding_type == 'conv1d':
             self.embedding_net = Conv1DEmbeddingNetwork(
@@ -342,10 +355,33 @@ class DINGOModel(nn.Module):
 # DATASET LOADING (bridges generate_dataset.py -> training)
 # ==============================================================================
 
-def load_dataset_pt(path, use_whitened=True):
+def crop_to_merger(data, half_width):
+    """Centre-crop a (..., T) strain tensor to ±half_width samples around T//2.
+
+    The data-gen pipeline fixes the merger at sample index T//2, so this
+    returns `data[..., T//2 - half_width : T//2 + half_width]`. Pass
+    `half_width=None` to leave the tensor unchanged.
+    """
+    if half_width is None:
+        return data
+    T = data.shape[-1]
+    c = T // 2
+    lo, hi = c - half_width, c + half_width
+    if lo < 0 or hi > T:
+        raise ValueError(
+            f"crop half_width={half_width} out of bounds for T={T} "
+            f"(would need samples [{lo}:{hi}])"
+        )
+    return data[..., lo:hi].contiguous()
+
+
+def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None):
     """Load dataset.pt from generate_dataset.py, split it, and z-score the params.
 
     Keeps the detector channel axis: data tensors have shape (N, num_detectors, T).
+    If `merger_crop_half_width` is an int, strain is centre-cropped to
+    ±half_width samples around the merger (which the data-gen pipeline
+    places at T//2), giving a new time axis of 2*half_width.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -357,6 +393,7 @@ def load_dataset_pt(path, use_whitened=True):
 
     X_key = 'X_whitened' if use_whitened else 'X'
     X = raw[X_key].float()      # (N, num_detectors, T)
+    X = crop_to_merger(X, merger_crop_half_width)
     y = raw['y'].float()        # (N, P)
     metadata = raw['metadata']
     param_names = list(metadata['parameter_names'])
@@ -411,7 +448,9 @@ def train_dingo_model(model, train_params, train_data,
                       num_epochs=20, batch_size=32, lr=1e-4,
                       weight_decay=1e-4,
                       val_params=None, val_data=None,
-                      patience=10,
+                      extra_patience_after_scheduler=3,
+                      checkpoint_path=None,
+                      checkpoint_extras=None,
                       optimizer_state_dict=None,
                       scheduler_state_dict=None,
                       start_epoch=0,
@@ -419,14 +458,25 @@ def train_dingo_model(model, train_params, train_data,
                       best_state_init=None,
                       best_epoch_init=0,
                       bad_epochs_init=0):
-    """Train with early stopping + best-val checkpointing.
+    """Train with early stopping + mid-run best-checkpoint persistence.
 
     Uses AdamW + ReduceLROnPlateau (keyed on val log-prob, falls back to
-    train log-prob when no val set is provided). Pass the *_state_dict and
-    *_init arguments to resume training from a saved checkpoint.
+    train log-prob when no val set is provided).
+
+    Early-stop rule: training halts once validation has failed to improve for
+    `scheduler.patience + extra_patience_after_scheduler` epochs in a row —
+    i.e. three epochs past the point at which the LR scheduler gave up. With
+    defaults (scheduler patience 3, extra 3) that is six bad epochs.
+
+    If `checkpoint_path` is provided, a full checkpoint is written to disk
+    every time validation improves, so a cancelled run still leaves the best
+    model on disk. `checkpoint_extras` is a dict whose entries are merged
+    into each saved checkpoint (e.g. config, param_norm_info).
+
+    Pass the *_state_dict and *_init arguments to resume training.
 
     Returns (losses, val_losses, best_state_dict, best_log_prob, best_epoch,
-             optimizer, scheduler).
+             optimizer, scheduler, bad_epochs).
     """
     if torch.isnan(train_params).any() or torch.isnan(train_data).any():
         raise ValueError("Input data contains NaN values")
@@ -441,6 +491,7 @@ def train_dingo_model(model, train_params, train_data,
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=3, min_lr=lr * 0.01
     )
+    patience = scheduler.patience + extra_patience_after_scheduler
 
     if optimizer_state_dict is not None:
         optimizer.load_state_dict(optimizer_state_dict)
@@ -450,11 +501,15 @@ def train_dingo_model(model, train_params, train_data,
     num_samples = len(train_params)
     has_val = val_params is not None and val_data is not None
 
-    print(f"\nTraining for up to {num_epochs} epochs  (early-stop patience={patience})")
+    print(f"\nTraining for up to {num_epochs} epochs")
+    print(f"  Early-stop patience: {patience}  "
+          f"(scheduler.patience={scheduler.patience} + extra={extra_patience_after_scheduler})")
     print(f"  Samples: {num_samples}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
     print(f"  Weight decay: {weight_decay}")
+    if checkpoint_path is not None:
+        print(f"  Persisting best model to disk on each improvement: {checkpoint_path}")
     if start_epoch > 0:
         print(f"  Resuming from epoch {start_epoch}")
     print()
@@ -526,6 +581,22 @@ def train_dingo_model(model, train_params, train_data,
             best_epoch = epoch + 1
             bad_epochs = 0
             marker = " *"
+            if checkpoint_path is not None:
+                ckpt = {
+                    'model_state_dict': best_state,
+                    'best_state': best_state,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'losses': list(losses),
+                    'val_losses': list(val_losses),
+                    'best_log_prob': best_log_prob,
+                    'best_epoch': best_epoch,
+                    'bad_epochs': bad_epochs,
+                    'epochs_completed': epoch + 1,
+                }
+                if checkpoint_extras:
+                    ckpt.update(checkpoint_extras)
+                torch.save(ckpt, checkpoint_path)
         else:
             bad_epochs += 1
             marker = ""
@@ -537,7 +608,9 @@ def train_dingo_model(model, train_params, train_data,
               f"Best: {best_log_prob:7.4f} @ ep{best_epoch}, Std: {batch_std:6.4f}, LR: {current_lr:.2e}{marker}")
 
         if bad_epochs >= patience:
-            print(f"\nEarly stop: no improvement for {patience} epochs (best was epoch {best_epoch}).")
+            print(f"\nEarly stop: no improvement for {patience} epochs "
+                  f"(scheduler.patience={scheduler.patience} + {extra_patience_after_scheduler}; "
+                  f"best was epoch {best_epoch}).")
             break
 
     # Restore best weights so the caller sees the best model.
@@ -560,25 +633,38 @@ if __name__ == '__main__':
     DATASET_PATH = 'Data/dataset.pt'    # produced by Data Generation/generate_dataset.py
     USE_WHITENED = True
 
+    # Crop whitened strain to ±N samples around the merger (index T//2).
+    # Set to None to keep the full 8192-sample window; set to an int (e.g. 500)
+    # to train on a physics-relevant window of length 2*N. Applied to train/val/
+    # test and to real events at eval time.
+    MERGER_CROP_HALF_WIDTH = 500
+
     # Model (CPU-friendly defaults)
     CONTEXT_DIM     = 128
     NUM_FLOW_LAYERS = 4
     HIDDEN_DIM      = 64
-    EMBEDDING_TYPE  = 'simple'     # 'simple' | 'conv1d' | 'lstm'
+    EMBEDDING_TYPE  = 'lstm'       # 'simple' | 'conv1d' | 'lstm'
 
     # Training (CPU-friendly defaults)
     NUM_EPOCHS    = 20
     BATCH_SIZE    = 32
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY  = 1e-4
-    PATIENCE      = 10
+    # Early-stop: halt `EXTRA_PATIENCE_AFTER_SCHEDULER` epochs after the LR
+    # scheduler (patience=3) has already given up — so default total patience
+    # is scheduler.patience + 3 = 6 bad epochs in a row.
+    EXTRA_PATIENCE_AFTER_SCHEDULER = 3
 
     # Set RESUME_FROM to a checkpoint path to continue training from it.
     RESUME_FROM = None
 
     # ----- Load data -----
     print(f"\nLoading dataset from: {DATASET_PATH}")
-    ds = load_dataset_pt(DATASET_PATH, use_whitened=USE_WHITENED)
+    if MERGER_CROP_HALF_WIDTH is not None:
+        print(f"  Cropping strain to ±{MERGER_CROP_HALF_WIDTH} samples around merger "
+              f"(new T = {2 * MERGER_CROP_HALF_WIDTH})")
+    ds = load_dataset_pt(DATASET_PATH, use_whitened=USE_WHITENED,
+                         merger_crop_half_width=MERGER_CROP_HALF_WIDTH)
 
     train_data,   train_params = ds['train_data'],   ds['train_params']
     val_data,     val_params   = ds['val_data'],     ds['val_params']
@@ -606,9 +692,10 @@ if __name__ == '__main__':
         signal_tag = "whitened"
     else:
         signal_tag = "noisy" if add_noise else "clean"
+    crop_tag = f"_crop{MERGER_CROP_HALF_WIDTH}" if MERGER_CROP_HALF_WIDTH is not None else ""
     MODEL_SAVE_PATH = (
         f"dingo_N{samples_str}_F{NUM_FLOW_LAYERS}_C{CONTEXT_DIM}_H{HIDDEN_DIM}"
-        f"_E{NUM_EPOCHS}_{EMBEDDING_TYPE}_{signal_tag}_cpu.pt"
+        f"_E{NUM_EPOCHS}_{EMBEDDING_TYPE}{crop_tag}_{signal_tag}_cpu.pt"
     )
     print(f"\nModel will be saved as: {MODEL_SAVE_PATH}")
 
@@ -648,37 +735,10 @@ if __name__ == '__main__':
         bad_epochs_init = ckpt.get('bad_epochs', 0)
         print(f"  Resumed @ epoch {start_epoch}, best_log_prob={best_log_prob_init}")
 
-    # ----- Train -----
-    (losses, val_losses, best_state, best_log_prob, best_epoch,
-     optimizer, scheduler, bad_epochs) = train_dingo_model(
-        model, train_params, train_data,
-        num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
-        val_params=val_params, val_data=val_data,
-        patience=PATIENCE,
-        optimizer_state_dict=optimizer_state_dict,
-        scheduler_state_dict=scheduler_state_dict,
-        start_epoch=start_epoch,
-        best_log_prob_init=best_log_prob_init,
-        best_state_init=best_state_init,
-        best_epoch_init=best_epoch_init,
-        bad_epochs_init=bad_epochs_init,
-    )
-
-    epochs_completed = start_epoch + len(losses)
-
-    # ----- Save best checkpoint -----
-    torch.save({
-        'model_state_dict': best_state,
-        'best_state': best_state,
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'losses': losses,
-        'val_losses': val_losses,
-        'best_log_prob': best_log_prob,
-        'best_epoch': best_epoch,
-        'bad_epochs': bad_epochs,
-        'epochs_completed': epochs_completed,
+    # Metadata merged into every checkpoint written during training. The
+    # loop persists the best model on each improvement, so a killed run
+    # still leaves the best state so far on disk.
+    checkpoint_extras = {
         'param_norm_info': param_norm_info,
         'model_param_names': param_names,
         'config': {
@@ -696,9 +756,29 @@ if __name__ == '__main__':
             'num_training_samples': num_training_samples,
             'add_noise': add_noise,
             'whiten': USE_WHITENED,
+            'merger_crop_half_width': MERGER_CROP_HALF_WIDTH,
             'seed': SEED,
         },
-    }, MODEL_SAVE_PATH)
+    }
 
-    print(f"\nSaved best model (epoch {best_epoch}) to: {MODEL_SAVE_PATH}")
+    # ----- Train -----
+    (losses, val_losses, best_state, best_log_prob, best_epoch,
+     optimizer, scheduler, bad_epochs) = train_dingo_model(
+        model, train_params, train_data,
+        num_epochs=NUM_EPOCHS, batch_size=BATCH_SIZE, lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+        val_params=val_params, val_data=val_data,
+        extra_patience_after_scheduler=EXTRA_PATIENCE_AFTER_SCHEDULER,
+        checkpoint_path=MODEL_SAVE_PATH,
+        checkpoint_extras=checkpoint_extras,
+        optimizer_state_dict=optimizer_state_dict,
+        scheduler_state_dict=scheduler_state_dict,
+        start_epoch=start_epoch,
+        best_log_prob_init=best_log_prob_init,
+        best_state_init=best_state_init,
+        best_epoch_init=best_epoch_init,
+        bad_epochs_init=bad_epochs_init,
+    )
+
+    print(f"\nBest model (epoch {best_epoch}) saved to: {MODEL_SAVE_PATH}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")

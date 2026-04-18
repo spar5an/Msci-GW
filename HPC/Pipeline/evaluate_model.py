@@ -3,12 +3,15 @@
 # split of dataset.pt, and produce report-quality plots + NPE metrics.
 #
 # Usage:
-#     python3.11 evaluate_model.py
+#     python3.11 evaluate_model.py [checkpoint.pt]
 #
-# Outputs are written to HPC/Pipeline/plots/.
+# If a checkpoint path is supplied it overrides the default. Outputs are
+# written to HPC/Pipeline/plots/<embedding>/ where <embedding> is parsed
+# from the checkpoint filename.
 
 import math
 import os
+import sys
 from pathlib import Path
 
 import corner
@@ -302,13 +305,20 @@ def compute_metrics(model, eval_params, eval_data, results, param_names,
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    CHECKPOINT = 'dingo_N8k_F4_C128_H64_E20_simple_whitened_cpu.pt'
+    CHECKPOINT = 'dingo_N8k_F4_C128_H64_E20_conv1d_whitened_cpu.pt'
+    if len(sys.argv) > 1:
+        CHECKPOINT = sys.argv[1]
     DATASET_PATH = 'Data/dataset.pt'
     EVAL_SPLIT = 'test'
     NUM_SAMPLES = 5000
     NUM_CORNERS = 3
-    PLOT_DIR = Path('plots')
-    PLOT_DIR.mkdir(exist_ok=True)
+
+    embedding_stem = next(
+        (tag for tag in ('simple', 'conv1d', 'lstm') if tag in Path(CHECKPOINT).stem),
+        'misc',
+    )
+    PLOT_DIR = Path('plots') / embedding_stem
+    PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
     SEED = 0
     torch.manual_seed(SEED)
@@ -322,7 +332,14 @@ if __name__ == '__main__':
     print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
 
     print(f"\nLoading dataset: {DATASET_PATH}  ({EVAL_SPLIT} split)")
-    ds = load_dataset_pt(DATASET_PATH, use_whitened=ckpt['config'].get('whiten', True))
+    crop_hw = ckpt['config'].get('merger_crop_half_width')
+    if crop_hw is not None:
+        print(f"  Applying merger crop ±{crop_hw} samples (from checkpoint config)")
+    ds = load_dataset_pt(
+        DATASET_PATH,
+        use_whitened=ckpt['config'].get('whiten', True),
+        merger_crop_half_width=crop_hw,
+    )
     eval_data = ds[f'{EVAL_SPLIT}_data']
     eval_params_z = ds[f'{EVAL_SPLIT}_params']
     param_names = ds['param_names']
