@@ -1,50 +1,0 @@
-/var/spool/pbs/mom_priv/jobs/1656667.pbs-7.SC: line 25: cd: HPC: No such file or directory
-Generating waveforms:   0%|          | 0/2500 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/2500 [00:00<20:25,  2.04it/s]Generating waveforms:   4%|▍         | 101/2500 [00:00<00:18, 128.47it/s]Generating waveforms:   8%|▊         | 201/2500 [00:01<00:13, 171.54it/s]Generating waveforms:  12%|█▏        | 301/2500 [00:01<00:11, 192.33it/s]Generating waveforms:  16%|█▌        | 401/2500 [00:02<00:10, 205.20it/s]Generating waveforms:  20%|██        | 501/2500 [00:02<00:09, 212.27it/s]Generating waveforms:  24%|██▍       | 601/2500 [00:03<00:08, 217.88it/s]Generating waveforms:  28%|██▊       | 701/2500 [00:03<00:08, 223.43it/s]Generating waveforms:  32%|███▏      | 801/2500 [00:04<00:07, 224.14it/s]Generating waveforms:  36%|███▌      | 901/2500 [00:04<00:07, 225.39it/s]Generating waveforms:  40%|████      | 1001/2500 [00:04<00:06, 225.41it/s]Generating waveforms:  44%|████▍     | 1101/2500 [00:05<00:06, 225.88it/s]Generating waveforms:  48%|████▊     | 1201/2500 [00:05<00:05, 226.77it/s]Generating waveforms:  52%|█████▏    | 1301/2500 [00:06<00:05, 227.66it/s]Generating waveforms:  56%|█████▌    | 1401/2500 [00:06<00:04, 226.83it/s]Generating waveforms:  60%|██████    | 1501/2500 [00:07<00:04, 226.84it/s]Generating waveforms:  64%|██████▍   | 1601/2500 [00:07<00:03, 228.54it/s]Generating waveforms:  68%|██████▊   | 1701/2500 [00:07<00:03, 226.05it/s]Generating waveforms:  72%|███████▏  | 1801/2500 [00:08<00:03, 225.03it/s]Generating waveforms:  76%|███████▌  | 1901/2500 [00:08<00:02, 224.44it/s]Generating waveforms:  80%|████████  | 2001/2500 [00:09<00:02, 225.11it/s]Generating waveforms:  84%|████████▍ | 2101/2500 [00:09<00:01, 228.22it/s]Generating waveforms:  88%|████████▊ | 2201/2500 [00:10<00:01, 227.15it/s]Generating waveforms:  92%|█████████▏| 2301/2500 [00:10<00:00, 228.69it/s]Generating waveforms:  96%|█████████▌| 2401/2500 [00:11<00:00, 229.73it/s]Generating waveforms: 100%|██████████| 2500/2500 [00:11<00:00, 226.54it/s]
-Generating waveforms:   0%|          | 0/2500 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/2500 [00:00<19:21,  2.15it/s]Generating waveforms:   4%|▍         | 101/2500 [00:00<00:18, 131.37it/s]Generating waveforms:   8%|▊         | 201/2500 [00:01<00:13, 172.50it/s]Generating waveforms:  12%|█▏        | 301/2500 [00:01<00:11, 192.86it/s]Generating waveforms:  16%|█▌        | 401/2500 [00:02<00:10, 204.21it/s]Generating waveforms:  20%|██        | 501/2500 [00:02<00:09, 210.09it/s]Generating waveforms:  24%|██▍       | 601/2500 [00:03<00:09, 197.54it/s]Generating waveforms:  28%|██▊       | 701/2500 [00:03<00:08, 221.84it/s]Generating waveforms:  32%|███▏      | 801/2500 [00:04<00:07, 224.67it/s]Generating waveforms:  36%|███▌      | 901/2500 [00:04<00:07, 225.00it/s]Generating waveforms:  40%|████      | 1001/2500 [00:04<00:06, 227.46it/s]Generating waveforms:  44%|████▍     | 1101/2500 [00:05<00:06, 224.46it/s]Generating waveforms:  48%|████▊     | 1201/2500 [00:05<00:05, 223.87it/s]Generating waveforms:  52%|█████▏    | 1301/2500 [00:06<00:05, 223.83it/s]Generating waveforms:  56%|█████▌    | 1401/2500 [00:06<00:04, 224.74it/s]Generating waveforms:  60%|██████    | 1501/2500 [00:07<00:04, 224.55it/s]Generating waveforms:  64%|██████▍   | 1601/2500 [00:07<00:03, 226.01it/s]Generating waveforms:  68%|██████▊   | 1701/2500 [00:08<00:03, 226.02it/s]Generating waveforms:  72%|███████▏  | 1801/2500 [00:08<00:03, 224.90it/s]Generating waveforms:  76%|███████▌  | 1901/2500 [00:08<00:02, 227.30it/s]Generating waveforms:  80%|████████  | 2001/2500 [00:09<00:02, 226.97it/s]Generating waveforms:  84%|████████▍ | 2101/2500 [00:09<00:01, 228.14it/s]Generating waveforms:  88%|████████▊ | 2201/2500 [00:10<00:01, 226.20it/s]Generating waveforms:  92%|█████████▏| 2301/2500 [00:10<00:00, 225.28it/s]Generating waveforms:  96%|█████████▌| 2401/2500 [00:11<00:00, 227.65it/s]Generating waveforms: 100%|██████████| 2500/2500 [00:11<00:00, 225.05it/s]
-/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu.py:635: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
-  scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() and use_mixed_precision else None
-/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu.py:667: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
-  with torch.cuda.amp.autocast():
-Traceback (most recent call last):
-  File "/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu.py", line 1276, in <module>
-    losses = train_dingo_model_pycbc(
-             ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu.py", line 672, in train_dingo_model_pycbc
-    context = model.embedding_net(batch_data)
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu.py", line 428, in forward
-    lstm_out, (h_n, c_n) = self.lstm(x)  # lstm_out: [batch, data_dim, hidden_dim*2]
-                           ^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/nn/modules/rnn.py", line 1127, in forward
-    result = _VF.lstm(
-             ^^^^^^^^^
-torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 11.83 GiB. GPU 0 has a total capacity of 44.39 GiB of which 11.09 GiB is free. Including non-PyTorch memory, this process has 33.29 GiB memory in use. Of the allocated memory 22.62 GiB is allocated by PyTorch, and 10.17 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
-terminate called after throwing an instance of 'c10::Error'
-  what():  i < config_.size() INTERNAL ASSERT FAILED at "/pytorch/c10/core/AllocatorConfig.h":116, please report a bug to PyTorch. Index out of bounds in ConfigTokenizer
-Exception raised from checkIndex at /pytorch/c10/core/AllocatorConfig.h:116 (most recent call first):
-frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x14ac3c5ffb80 in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libc10.so)
-frame #1: c10::detail::torchCheckFail(char const*, char const*, unsigned int, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) + 0x65 (0x14ac3c591fbf in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libc10.so)
-frame #2: c10::detail::torchInternalAssertFail(char const*, char const*, unsigned int, char const*, char const*) + 0x42 (0x14ac3c5fc522 in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libc10.so)
-frame #3: c10::CachingAllocator::AcceleratorAllocatorConfig::parseArgs(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) + 0x8f1 (0x14ac3c596271 in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libc10.so)
-frame #4: <unknown function> + 0x344cf (0x14ac3c5964cf in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libc10.so)
-frame #5: c10::CachingAllocator::AcceleratorAllocatorConfig::instance() + 0x58 (0x14ac3c5967d8 in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libc10.so)
-frame #6: <unknown function> + 0xc7b3d4 (0x14ac3d3a93d4 in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libtorch_cuda.so)
-frame #7: <unknown function> + 0xc7401b (0x14ac3d3a201b in /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/torch/lib/libtorch_cuda.so)
-frame #8: <unknown function> + 0x50ccc (0x14ac9c2a0ccc in /lib64/libc.so.6)
-frame #9: on_exit + 0 (0x14ac9c2a0e00 in /lib64/libc.so.6)
-frame #10: __libc_start_main + 0xec (0x14ac9c28a7ec in /lib64/libc.so.6)
-<omitting python frames>
-
-/var/spool/pbs/mom_priv/jobs/1656667.pbs-7.SC: line 72: 1549641 Aborted                 (core dumped) python dingo_npe_gpu.py

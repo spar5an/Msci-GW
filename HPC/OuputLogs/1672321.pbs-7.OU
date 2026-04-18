@@ -1,172 +1,0 @@
-=== DEBUG INFO ===
-hostname: cx3-20-1
-pwd: /rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC
-which python: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
-Python 3.11.3
-=== Try importing pycbc in PBS job ===
-pycbc OK in PBS
-pycbc file: /rds/general/user/hm2622/home/venv/pycbcenv/lib/python3.11/site-packages/pycbc/__init__.py
-python exe: /rds/general/user/hm2622/home/venv/pycbcenv/bin/python
-Host: cx3-20-1
-GPUs visible to CUDA:
-Mon Feb  9 13:39:01 2026       
-+-----------------------------------------------------------------------------------------+
-| NVIDIA-SMI 580.82.07              Driver Version: 580.82.07      CUDA Version: 13.0     |
-+-----------------------------------------+------------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
-|                                         |                        |               MIG M. |
-|=========================================+========================+======================|
-|   0  NVIDIA L40S                    On  |   00000000:B4:00.0 Off |                    0 |
-| N/A   39C    P8             34W /  350W |       0MiB /  46068MiB |      0%      Default |
-|                                         |                        |                  N/A |
-+-----------------------------------------+------------------------+----------------------+
-
-+-----------------------------------------------------------------------------------------+
-| Processes:                                                                              |
-|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
-|        ID   ID                                                               Usage      |
-|=========================================================================================|
-|  No running processes found                                                             |
-+-----------------------------------------------------------------------------------------+
-=== Starting GPU Monitor (logging to gpu_monitor.log and gpu_data.csv) ===
-GPU monitor started with PID: 3726802
-=== Starting Training Monitor (logging to training_progress.log) ===
-Training monitor started with PID: 3726803
-=== TRAINING CONFIGURATION - Model and Training Parameters ===
-
-======================================================================
-MODEL ARCHITECTURE PARAMETERS
-======================================================================
-  Parameter Dimension (PARAM_DIM):        3
-  Context Dimension (CONTEXT_DIM):        512
-  Number of Flow Layers (NUM_FLOW_LAYERS): 4
-  Hidden Dimension (HIDDEN_DIM):          128
-  Embedding Type (EMBEDDING_TYPE):        linear
-
-======================================================================
-TRAINING PARAMETERS
-======================================================================
-  Number of Epochs (NUM_EPOCHS):          500
-  Batch Size (BATCH_SIZE):                64
-  Learning Rate (LEARNING_RATE):          0.0001
-  Training Samples (NUM_TRAINING_SAMPLES): 100,000
-  Denormalize Output (DENORMALIZE_PARAMETERS): True
-
-======================================================================
-COMPUTED METRICS
-======================================================================
-  Estimated Batches per Epoch:            1562
-  Total Batch Updates:                    781000
-  Input Data Dimension:                   2048 (two 1024-sample detectors)
-  Physics Parameters:                     mass1, mass2, spin1z
-
-======================================================================
-Configuration complete. Starting training...
-======================================================================
-
-=== Run dingo_npe_gpu_two_detectors.py ===
-Libraries imported successfully
-PyTorch version: 2.9.1+cu128
-Device: cuda
-  GPU: NVIDIA L40S
-  GPU Memory: 47.7 GB
-✓ Improved coupling layer with batch normalization defined
-✓ Normalizing flow defined
-✓ Embedding network defined
-
-Calling pycbc_data_generator with 30000 samples...
-Generating 30000 waveforms with projection to ['H1', 'L1']
-  Using default sky location: ra=0.0, dec=π/2 (north pole), psi=0.0
-
-Chunk 1/6 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<41:34,  2.00it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:38, 128.46it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:27, 173.37it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:24, 194.98it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 201.42it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 211.06it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 214.88it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 219.85it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:04<00:19, 220.37it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 222.21it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:17, 224.03it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 224.10it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:16, 226.28it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 228.22it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:15, 228.85it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 228.74it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:14, 228.54it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:07<00:14, 227.42it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 228.32it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:08<00:13, 227.59it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 228.33it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:09<00:12, 225.53it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 225.80it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:12, 209.54it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:11<00:11, 231.12it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:10, 233.44it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:11<00:10, 230.36it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 227.19it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:12<00:09, 229.23it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 228.59it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:13<00:08, 229.80it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:08, 229.76it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:14<00:07, 230.43it/s]Generating waveforms:  66%|██████▌   | 3301/5000 [00:14<00:07, 230.44it/s]Generating waveforms:  68%|██████▊   | 3401/5000 [00:15<00:06, 230.59it/s]Generating waveforms:  70%|███████   | 3501/5000 [00:15<00:06, 229.01it/s]Generating waveforms:  72%|███████▏  | 3601/5000 [00:16<00:06, 231.17it/s]Generating waveforms:  74%|███████▍  | 3701/5000 [00:16<00:05, 231.54it/s]Generating waveforms:  76%|███████▌  | 3801/5000 [00:17<00:05, 228.46it/s]Generating waveforms:  78%|███████▊  | 3901/5000 [00:17<00:04, 226.99it/s]Generating waveforms:  80%|████████  | 4001/5000 [00:18<00:04, 226.76it/s]Generating waveforms:  82%|████████▏ | 4101/5000 [00:18<00:03, 226.90it/s]Generating waveforms:  84%|████████▍ | 4201/5000 [00:18<00:03, 228.30it/s]Generating waveforms:  86%|████████▌ | 4301/5000 [00:19<00:03, 228.18it/s]Generating waveforms:  88%|████████▊ | 4401/5000 [00:19<00:02, 228.59it/s]Generating waveforms:  90%|█████████ | 4501/5000 [00:20<00:02, 228.99it/s]Generating waveforms:  92%|█████████▏| 4601/5000 [00:20<00:01, 228.42it/s]Generating waveforms:  94%|█████████▍| 4701/5000 [00:21<00:01, 227.82it/s]Generating waveforms:  96%|█████████▌| 4801/5000 [00:21<00:00, 227.70it/s]Generating waveforms:  98%|█████████▊| 4901/5000 [00:22<00:00, 227.30it/s]Generating waveforms: 100%|██████████| 5000/5000 [00:22<00:00, 227.13it/s]
-  Chunk: 5000 successful
-
-Chunk 2/6 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<38:03,  2.19it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:36, 134.40it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:27, 176.40it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:23, 196.76it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 206.83it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 212.16it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 218.48it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 221.84it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:03<00:18, 223.87it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 223.99it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:17, 224.78it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 225.51it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:16, 224.43it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 225.83it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:16, 224.69it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 226.86it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:14, 226.97it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:07<00:14, 227.57it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 226.76it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:08<00:13, 228.59it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 226.11it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:09<00:12, 224.43it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 225.62it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:11, 228.23it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:11<00:11, 229.17it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:10, 229.10it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:11<00:10, 230.54it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 229.53it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:12<00:09, 228.93it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 229.21it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:13<00:08, 228.98it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:08, 225.78it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:14<00:07, 225.45it/s]Generating waveforms:  66%|██████▌   | 3301/5000 [00:14<00:07, 226.52it/s]Generating waveforms:  68%|██████▊   | 3401/5000 [00:15<00:07, 227.97it/s]Generating waveforms:  70%|███████   | 3501/5000 [00:15<00:06, 227.17it/s]Generating waveforms:  72%|███████▏  | 3601/5000 [00:16<00:06, 227.24it/s]Generating waveforms:  74%|███████▍  | 3701/5000 [00:16<00:05, 228.82it/s]Generating waveforms:  76%|███████▌  | 3801/5000 [00:17<00:05, 229.20it/s]Generating waveforms:  78%|███████▊  | 3901/5000 [00:17<00:04, 229.63it/s]Generating waveforms:  80%|████████  | 4001/5000 [00:18<00:04, 230.31it/s]Generating waveforms:  82%|████████▏ | 4101/5000 [00:18<00:03, 231.72it/s]Generating waveforms:  84%|████████▍ | 4201/5000 [00:18<00:03, 230.89it/s]Generating waveforms:  86%|████████▌ | 4301/5000 [00:19<00:03, 230.07it/s]Generating waveforms:  88%|████████▊ | 4401/5000 [00:19<00:02, 230.04it/s]Generating waveforms:  90%|█████████ | 4501/5000 [00:20<00:02, 228.12it/s]Generating waveforms:  92%|█████████▏| 4601/5000 [00:20<00:01, 229.17it/s]Generating waveforms:  94%|█████████▍| 4701/5000 [00:21<00:01, 229.60it/s]Generating waveforms:  96%|█████████▌| 4801/5000 [00:21<00:00, 230.66it/s]Generating waveforms:  98%|█████████▊| 4901/5000 [00:21<00:00, 231.98it/s]Generating waveforms: 100%|██████████| 5000/5000 [00:21<00:00, 228.11it/s]
-  Chunk: 5000 successful
-
-Chunk 3/6 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<39:45,  2.10it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:37, 131.24it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:27, 176.88it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:23, 196.96it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 208.61it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 213.85it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 218.75it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 222.72it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:03<00:18, 225.70it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 224.34it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:17, 227.22it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 226.63it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:16, 227.63it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 230.50it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:15, 227.47it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 228.21it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:14, 227.65it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:07<00:14, 228.52it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 225.34it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:08<00:13, 225.78it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 225.87it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:09<00:12, 227.10it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 227.70it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:11, 227.99it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:10<00:11, 228.97it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:11, 209.45it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:11<00:10, 234.68it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:09, 234.82it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:12<00:09, 231.09it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 230.16it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:13<00:08, 229.55it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:08, 231.84it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:14<00:07, 230.62it/s]Generating waveforms:  66%|██████▌   | 3301/5000 [00:14<00:07, 227.83it/s]Generating waveforms:  68%|██████▊   | 3401/5000 [00:15<00:07, 228.27it/s]Generating waveforms:  70%|███████   | 3501/5000 [00:15<00:06, 228.44it/s]Generating waveforms:  72%|███████▏  | 3601/5000 [00:16<00:06, 228.18it/s]Generating waveforms:  74%|███████▍  | 3701/5000 [00:16<00:05, 228.09it/s]Generating waveforms:  76%|███████▌  | 3801/5000 [00:17<00:05, 228.68it/s]Generating waveforms:  78%|███████▊  | 3901/5000 [00:17<00:04, 227.26it/s]Generating waveforms:  80%|████████  | 4001/5000 [00:17<00:04, 229.16it/s]Generating waveforms:  82%|████████▏ | 4101/5000 [00:18<00:03, 227.31it/s]Generating waveforms:  84%|████████▍ | 4201/5000 [00:18<00:03, 226.91it/s]Generating waveforms:  86%|████████▌ | 4301/5000 [00:19<00:03, 228.17it/s]Generating waveforms:  88%|████████▊ | 4401/5000 [00:19<00:02, 226.37it/s]Generating waveforms:  90%|█████████ | 4501/5000 [00:20<00:02, 226.45it/s]Generating waveforms:  92%|█████████▏| 4601/5000 [00:20<00:01, 225.21it/s]Generating waveforms:  94%|█████████▍| 4701/5000 [00:21<00:01, 226.17it/s]Generating waveforms:  96%|█████████▌| 4801/5000 [00:21<00:00, 228.83it/s]Generating waveforms:  98%|█████████▊| 4901/5000 [00:21<00:00, 227.95it/s]Generating waveforms: 100%|██████████| 5000/5000 [00:21<00:00, 227.75it/s]
-  Chunk: 5000 successful
-
-Chunk 4/6 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<38:20,  2.17it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:37, 132.38it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:27, 177.41it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:24, 195.35it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 205.69it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 213.21it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 217.05it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 220.99it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:03<00:18, 221.40it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 224.63it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:17, 224.91it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 224.08it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:16, 224.19it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 225.15it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:15, 226.23it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 226.53it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:14, 227.94it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:07<00:14, 226.03it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 226.35it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:08<00:13, 228.29it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 226.96it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:09<00:12, 226.48it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 224.86it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:11, 225.17it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:11<00:11, 226.18it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:11, 226.09it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:11<00:10, 226.43it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 227.69it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:12<00:09, 229.84it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 228.12it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:13<00:08, 228.03it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:08, 228.92it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:14<00:07, 227.27it/s]Generating waveforms:  66%|██████▌   | 3301/5000 [00:15<00:07, 225.96it/s]Generating waveforms:  68%|██████▊   | 3401/5000 [00:15<00:07, 224.96it/s]Generating waveforms:  70%|███████   | 3501/5000 [00:15<00:06, 224.94it/s]Generating waveforms:  72%|███████▏  | 3601/5000 [00:16<00:06, 224.74it/s]Generating waveforms:  74%|███████▍  | 3701/5000 [00:16<00:05, 226.26it/s]Generating waveforms:  76%|███████▌  | 3801/5000 [00:17<00:05, 225.39it/s]Generating waveforms:  78%|███████▊  | 3901/5000 [00:17<00:04, 223.74it/s]Generating waveforms:  80%|████████  | 4001/5000 [00:18<00:04, 226.36it/s]Generating waveforms:  82%|████████▏ | 4101/5000 [00:18<00:04, 224.65it/s]Generating waveforms:  84%|████████▍ | 4201/5000 [00:19<00:03, 226.27it/s]Generating waveforms:  86%|████████▌ | 4301/5000 [00:19<00:03, 228.32it/s]Generating waveforms:  88%|████████▊ | 4401/5000 [00:19<00:02, 229.13it/s]Generating waveforms:  90%|█████████ | 4501/5000 [00:20<00:02, 226.24it/s]Generating waveforms:  92%|█████████▏| 4601/5000 [00:20<00:01, 226.63it/s]Generating waveforms:  94%|█████████▍| 4701/5000 [00:21<00:01, 229.14it/s]Generating waveforms:  96%|█████████▌| 4801/5000 [00:21<00:00, 229.37it/s]Generating waveforms:  98%|█████████▊| 4901/5000 [00:22<00:00, 228.71it/s]Generating waveforms: 100%|██████████| 5000/5000 [00:22<00:00, 226.64it/s]
-  Chunk: 5000 successful
-
-Chunk 5/6 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<37:29,  2.22it/s]Generating waveforms:   2%|▏         | 101/5000 [00:00<00:36, 133.96it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:26, 178.05it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:23, 196.89it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:21, 209.35it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 212.62it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 217.02it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 219.28it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:03<00:18, 221.82it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 222.00it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:17, 222.69it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 223.50it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:16, 225.42it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 226.23it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:15, 226.91it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 227.75it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:14, 227.24it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:07<00:14, 229.34it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 227.25it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:08<00:13, 228.72it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 230.53it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:09<00:12, 228.59it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 229.34it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:11, 230.78it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:10<00:11, 229.19it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:10, 231.04it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:11<00:10, 229.70it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 227.66it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:12<00:09, 225.54it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 225.00it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:13<00:08, 226.22it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:08, 223.86it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:14<00:07, 225.90it/s]Generating waveforms:  66%|██████▌   | 3301/5000 [00:14<00:07, 226.95it/s]Generating waveforms:  68%|██████▊   | 3401/5000 [00:15<00:07, 227.25it/s]Generating waveforms:  70%|███████   | 3501/5000 [00:15<00:06, 229.04it/s]Generating waveforms:  72%|███████▏  | 3601/5000 [00:16<00:06, 228.81it/s]Generating waveforms:  74%|███████▍  | 3701/5000 [00:16<00:05, 229.65it/s]Generating waveforms:  76%|███████▌  | 3801/5000 [00:17<00:05, 229.23it/s]Generating waveforms:  78%|███████▊  | 3901/5000 [00:17<00:04, 225.92it/s]Generating waveforms:  80%|████████  | 4001/5000 [00:18<00:04, 225.46it/s]Generating waveforms:  82%|████████▏ | 4101/5000 [00:18<00:03, 225.60it/s]Generating waveforms:  84%|████████▍ | 4201/5000 [00:18<00:03, 227.19it/s]Generating waveforms:  86%|████████▌ | 4301/5000 [00:19<00:03, 225.71it/s]Generating waveforms:  88%|████████▊ | 4401/5000 [00:19<00:02, 224.87it/s]Generating waveforms:  90%|█████████ | 4501/5000 [00:20<00:02, 226.66it/s]Generating waveforms:  92%|█████████▏| 4601/5000 [00:20<00:01, 228.03it/s]Generating waveforms:  94%|█████████▍| 4701/5000 [00:21<00:01, 226.07it/s]Generating waveforms:  96%|█████████▌| 4801/5000 [00:21<00:00, 225.34it/s]Generating waveforms:  98%|█████████▊| 4901/5000 [00:22<00:00, 225.34it/s]Generating waveforms: 100%|██████████| 5000/5000 [00:22<00:00, 227.01it/s]
-  Chunk: 5000 successful
-
-Chunk 6/6 (5000 waveforms)...
-Generating waveforms:   0%|          | 0/5000 [00:00<?, ?it/s]Generating waveforms:   0%|          | 1/5000 [00:00<38:17,  2.18it/s]Generating waveforms:   2%|▏         | 101/5000 [00:01<00:45, 107.88it/s]Generating waveforms:   4%|▍         | 201/5000 [00:01<00:34, 138.76it/s]Generating waveforms:   6%|▌         | 301/5000 [00:01<00:24, 190.08it/s]Generating waveforms:   8%|▊         | 401/5000 [00:02<00:22, 201.73it/s]Generating waveforms:  10%|█         | 501/5000 [00:02<00:21, 211.43it/s]Generating waveforms:  12%|█▏        | 601/5000 [00:03<00:20, 219.32it/s]Generating waveforms:  14%|█▍        | 701/5000 [00:03<00:19, 223.12it/s]Generating waveforms:  16%|█▌        | 801/5000 [00:04<00:18, 224.93it/s]Generating waveforms:  18%|█▊        | 901/5000 [00:04<00:18, 227.12it/s]Generating waveforms:  20%|██        | 1001/5000 [00:04<00:17, 228.48it/s]Generating waveforms:  22%|██▏       | 1101/5000 [00:05<00:17, 227.37it/s]Generating waveforms:  24%|██▍       | 1201/5000 [00:05<00:16, 227.69it/s]Generating waveforms:  26%|██▌       | 1301/5000 [00:06<00:16, 227.29it/s]Generating waveforms:  28%|██▊       | 1401/5000 [00:06<00:15, 229.40it/s]Generating waveforms:  30%|███       | 1501/5000 [00:07<00:15, 227.00it/s]Generating waveforms:  32%|███▏      | 1601/5000 [00:07<00:14, 226.63it/s]Generating waveforms:  34%|███▍      | 1701/5000 [00:08<00:14, 227.15it/s]Generating waveforms:  36%|███▌      | 1801/5000 [00:08<00:14, 226.53it/s]Generating waveforms:  38%|███▊      | 1901/5000 [00:08<00:13, 228.07it/s]Generating waveforms:  40%|████      | 2001/5000 [00:09<00:13, 228.35it/s]Generating waveforms:  42%|████▏     | 2101/5000 [00:09<00:12, 224.88it/s]Generating waveforms:  44%|████▍     | 2201/5000 [00:10<00:12, 227.37it/s]Generating waveforms:  46%|████▌     | 2301/5000 [00:10<00:11, 228.14it/s]Generating waveforms:  48%|████▊     | 2401/5000 [00:11<00:11, 225.07it/s]Generating waveforms:  50%|█████     | 2501/5000 [00:11<00:11, 225.46it/s]Generating waveforms:  52%|█████▏    | 2601/5000 [00:12<00:10, 226.40it/s]Generating waveforms:  54%|█████▍    | 2701/5000 [00:12<00:10, 225.93it/s]Generating waveforms:  56%|█████▌    | 2801/5000 [00:12<00:09, 225.73it/s]Generating waveforms:  58%|█████▊    | 2901/5000 [00:13<00:09, 223.83it/s]Generating waveforms:  60%|██████    | 3001/5000 [00:13<00:08, 224.24it/s]Generating waveforms:  62%|██████▏   | 3101/5000 [00:14<00:08, 226.00it/s]Generating waveforms:  64%|██████▍   | 3201/5000 [00:14<00:08, 223.90it/s]Generating waveforms:  66%|██████▌   | 3301/5000 [00:15<00:07, 223.23it/s]Generating waveforms:  68%|██████▊   | 3401/5000 [00:15<00:07, 224.33it/s]Generating waveforms:  70%|███████   | 3501/5000 [00:16<00:06, 225.77it/s]Generating waveforms:  72%|███████▏  | 3601/5000 [00:16<00:06, 225.96it/s]Generating waveforms:  74%|███████▍  | 3701/5000 [00:16<00:05, 225.14it/s]Generating waveforms:  76%|███████▌  | 3801/5000 [00:17<00:05, 226.04it/s]Generating waveforms:  78%|███████▊  | 3901/5000 [00:17<00:04, 226.76it/s]Generating waveforms:  80%|████████  | 4001/5000 [00:18<00:04, 225.46it/s]Generating waveforms:  82%|████████▏ | 4101/5000 [00:18<00:03, 227.65it/s]Generating waveforms:  84%|████████▍ | 4201/5000 [00:19<00:03, 225.80it/s]Generating waveforms:  86%|████████▌ | 4301/5000 [00:19<00:03, 227.72it/s]Generating waveforms:  88%|████████▊ | 4401/5000 [00:19<00:02, 229.84it/s]Generating waveforms:  90%|█████████ | 4501/5000 [00:20<00:02, 228.11it/s]Generating waveforms:  92%|█████████▏| 4601/5000 [00:20<00:01, 227.00it/s]Generating waveforms:  94%|█████████▍| 4701/5000 [00:21<00:01, 226.15it/s]Generating waveforms:  96%|█████████▌| 4801/5000 [00:21<00:00, 228.46it/s]Generating waveforms:  98%|█████████▊| 4901/5000 [00:22<00:00, 228.62it/s]Generating waveforms: 100%|██████████| 5000/5000 [00:22<00:00, 225.29it/s]
-  Chunk: 5000 successful
-
-Generation complete: 30000 successful, 0 failed
-
-Processing 30000 waveforms...
-  Detector channels: ['H1', 'L1']
-  Waveform lengths: min=1977, max=6949
-  WARNING: Variable lengths detected. Applying zero-padding.
-  Padding will be added at the beginning (before signal starts).
-  Target length: 6949
-  Converting to PyTorch tensors...
-  Normalizing: global z-score (mean=0, std=1)
-  ✓ RECOMMENDED: Preserves amplitude variation between samples
-  Global stats: mean=1.30e-26, std=5.56e-20
-  Amplitude stats: mean=0.96 ± 0.29
-  Normalizing parameters: z-score (mean=0, std=1)
-  Parameters normalized:
-    mass1: mean=29.9192, std=11.5461
-    mass2: mean=30.1134, std=11.5346
-    spin1z: mean=-0.0016, std=0.2891
-  Tensors: X=torch.Size([30000, 2, 6949]), y=torch.Size([30000, 3])
-  Splits: train=24000, val=3000, test=3000
-
-Ready! DataLoaders with batch_size=16
-✓ Data generator completed successfully
-Accessing dataloaders and metadata from result...
-✓ Got dataloaders: train=1500 batches, val=188 batches, test=188 batches
-✓ Parameter normalization info stored
-
-Processing training data from dataloaders...
-  (TWO-DETECTOR MODE: Concatenating H1 and L1 streams)
-  Processing batch 0/1500
-  Processing batch 1000/1500
-  Training data: torch.Size([24000, 13898]), params: torch.Size([24000, 3])
-
-Processing test data from dataloaders...
-  (TWO-DETECTOR MODE: Concatenating H1 and L1 streams)
-  Processing test batch 0/188
-  Processing test batch 100/188
-  Test data: torch.Size([3000, 13898]), params: torch.Size([3000, 3])
-✓ Data preparation complete (two-detector concatenation applied)
-
-Using normalized parameters from data generator
-  Training samples: 24000
-  Test samples: 3000
-  Data dimension: 13898 (2 detectors concatenated)
-  Normalization info stored for denormalization
-
-Traceback (most recent call last):
-  File "/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu_two_detectors.py", line 900, in <module>
-    model = DINGOModel(
-            ^^^^^^^^^^^
-  File "/rds/general/user/hm2622/home/Msci Project/Msci-GW/HPC/dingo_npe_gpu_two_detectors.py", line 493, in __init__
-    raise ValueError(f"Unknown embedding_type: {embedding_type}. Must be 'simple', 'conv1d', or 'lstm'.")
-ValueError: Unknown embedding_type: linear. Must be 'simple', 'conv1d', or 'lstm'.
-[W209 13:42:00.661778254 AllocatorConfig.cpp:28] Warning: PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead (function operator())
-=== Stopping Monitors ===
-=== Generating GPU Usage Plot ===
-⚠ No valid GPU data found in CSV file
-=== Done ===
-
-====================================
-CPU Time used: 00:01:29
-CPU Percent: 68%
-Memory usage: 1550932kb
-Approx Power usage: 0.0002
-Walltime usage: 00:03:25
-
-====================================

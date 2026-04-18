@@ -495,14 +495,19 @@ Loading reconstructs the exact same split using `torch.utils.data.Subset`. The t
 ```
 1. Download    → 32 s HDF5 for H1 and L1 via TimeSeries.fetch_open_data
                  (cached under hdf5/; skipped on re-run)
-2. Whiten      → whiten_waveform() on the FULL 32 s strain
+2. NaN guard   → reject the event if H1 or L1 strain contains any
+                 non-finite samples (GWOSC data gap). Raised from
+                 process_to_pt and counted as a failure upstream.
+3. Whiten      → whiten_waveform() on the FULL 32 s strain
                  (bandpass 35–300 Hz, Tukey α=0.1 both sides)
-3. Crop        → slice a 2 s window centred on the GPS merger time
+4. Crop        → slice a 2 s window centred on the GPS merger time
                  → 8192 samples (N_2S)
-4. Save        → stack across events, build combined dict, torch.save
+5. Save        → stack across events, build combined dict, torch.save
 ```
 
 The order matters: whitening uses the full 32 s because the Welch PSD estimator needs a long segment for a clean spectral estimate. Cropping to 2 s first would force `whiten_waveform` onto the analytic aLIGO fallback and distort low-frequency content. Both the raw and whitened arrays are cropped from the same `[i_start:i_end]` indices, so they stay aligned.
+
+The NaN guard exists because `both_detectors_available(gps)` only checks that GWOSC *has URLs* for the window — it cannot tell whether those frames hold science data. In practice ~5 % of O4 events return a fully-NaN or partially-gapped HDF5; whitening those events produces NaN everywhere (FFT of NaN propagates). The guard catches both: a single NaN sample in the 32 s drops the event.
 
 ### Folder layout
 
@@ -603,6 +608,20 @@ from download_real_data import (
 
 `run()` is the only function that hits the network (via `list_o4_events` + `download_strain_hdf5`). Tests that want to stay offline should call `process_to_pt` + `build_combined` directly against cached HDF5 pairs — see `test_download_real_data.py`.
 
+### Offline rebuild — `reprocess_cached.py`
+
+**File:** `HPC/Pipeline/Real Data/reprocess_cached.py`
+**Purpose:** rebuild the combined `.pt` purely from the local `hdf5/` cache, no network. Discovers every `<EVENT>_H1_strain.hdf5` + `<EVENT>_L1_strain.hdf5` pair, recovers each `gps_merger` from the HDF5 `t0` attribute (`t0 + DURATION/2`), runs `process_to_pt` + `build_combined`, and writes the same `COMBINED_NAME` file.
+
+Use it after a fresh `download_real_data.py` run, or any time the NaN guard / whitening logic changes — it re-whitens everything from the cached raw strain without re-fetching from GWOSC.
+
+```bash
+cd "Msci-GW/HPC/Pipeline/Real Data"
+python reprocess_cached.py
+```
+
+Output summary prints `Processed: N   Dropped: M` with the reason per dropped event. Typical yield on the O4 cache: 112 events kept, 8 dropped to NaN gaps.
+
 ---
 
 ## Testing
@@ -615,6 +634,7 @@ from download_real_data import (
 | `test_o4_real.py` | O4 PSD cache validation; GR, MG, LV with real O4 noise; save/load; `X_whitened` save; plots |
 | `test_download_real_data.py` | Real-data pipeline on cached HDF5s (no network): layout, combined-pt schema, `load_dataloaders` compatibility, raw-strain plot |
 | `test_real_vs_sim_plot.py` | End-to-end cross-check: loads one simulated and one real `.pt` through the same `load_dataloaders`; writes `plots/real_vs_sim_h1.png` (raw + whitened, 2×2) |
+| `plot_o4_real_pt.py` | Standalone (not a pytest): loads `Real Data/pt/o4_all_events_2s_real.pt` and writes `plots/o4_all_events.pdf` (4 events / page, H1+L1 raw + whitened) and optional per-event PNGs under `plots/o4_events/`. Run `python plot_o4_real_pt.py [--no-pngs]`. |
 | `conftest.py` | Shared fixtures: `small_config`, `base_kwargs`, `aligo_kwargs`, `psd_cache_dir` |
 
 ```bash
