@@ -28,7 +28,7 @@ from gw_datagen import (
 # so that all modes produce the same label dimensions for ML; unused params are 0.
 MODE = 'gr'
 
-NUM_SAMPLES  = 100
+NUM_SAMPLES  = 10000
 OUTPUT_PATH  = 'dataset.pt'
 ADD_NOISE    = True
 NUM_WORKERS  = 4
