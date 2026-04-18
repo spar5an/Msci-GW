@@ -1,4 +1,4 @@
-__pycache__/
+/__pycache__
 .pytest_cache/
 CLAUDE.md
 /.claude
@@ -13,3 +13,4 @@ HPC/test7_o4_psds_all.csv
 /HPC/OutputLogs
 /depreciated
 *.hdf5
+/hpc_outputs

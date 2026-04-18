@@ -19,7 +19,7 @@ import sys
 
 import numpy as np
 
-from gw_datagen import _cache_path, build_o4_psd_cache
+from gw_datagen import _cache_path, build_o4_psd_cache, _DEFAULT_CACHE
 
 
 def parse_args() -> argparse.Namespace:

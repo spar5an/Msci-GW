@@ -1,0 +1,66 @@
+#!/bin/bash
+#PBS -N download_psds
+#PBS -l walltime=06:00:00
+#PBS -l select=1:ncpus=2:mem=8gb
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# 1) Clean module environment
+module purge
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+
+# 2) Activate venv
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+# 3) Resolve repo paths
+REPO_ROOT="/rds/general/user/jc5322/home/Project/Msci-GW"
+DATAGEN_DIR="$REPO_ROOT/HPC/Pipeline/Data Generation"
+
+cd "$DATAGEN_DIR"
+
+# 4) Debug info
+echo "=== DEBUG INFO ==="
+echo "hostname:     $(hostname)"
+echo "pwd:          $(pwd)"
+echo "which python: $(which python)"
+python -V
+
+# 4b) Pre-flight
+echo
+echo "=== Pre-flight: import gw_datagen ==="
+python -c "from gw_datagen import _cache_path, build_o4_psd_cache, _DEFAULT_CACHE; print('gw_datagen imports OK')" || {
+    echo "ERROR: gw_datagen failed to import."
+    exit 1
+}
+
+# 5) Download PSDs. N_SEGMENTS controls how many O4a science segments to fetch
+#    per detector. --force overwrites existing cache files (the download script
+#    doesn't support appending; to add more you must re-download the full set).
+#
+#    Override at submit time with:  qsub -v N_SEGMENTS=100 download_psds.pbs
+N_SEGMENTS="${N_SEGMENTS:-50}"
+
+echo
+echo "=== Download O4a PSDs (H1, L1; $N_SEGMENTS segments each, --force) ==="
+python download_o4_psds.py --detectors H1 L1 --n-segments "$N_SEGMENTS" --force
+EXIT_CODE=$?
+
+# 6) Report what's in the cache now
+echo
+echo "=== Cache summary ==="
+python -c "
+import os, numpy as np
+cache = os.path.join(os.getcwd(), 'o4_psd_cache')
+for det in ('H1', 'L1'):
+    p = os.path.join(cache, f'o4_psds_{det}_4096Hz.npz')
+    if os.path.isfile(p):
+        n = np.load(p)['psds'].shape[0]
+        print(f'  {det}: {n} PSDs  ->  {p}')
+    else:
+        print(f'  {det}: MISSING')
+"
+
+echo
+echo "=== Done (exit $EXIT_CODE) ==="
+exit $EXIT_CODE

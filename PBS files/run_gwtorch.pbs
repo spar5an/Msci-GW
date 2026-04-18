@@ -1,0 +1,47 @@
+#!/bin/bash
+#PBS -N gwtorch_test
+#PBS -l walltime=00:20:00
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_type=L40S
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# 1) Clean module environment
+module purge
+
+# 2) Same modules used to build the venv
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+
+# 3) Activate the venv (FULL PATH from `realpath`)
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+# 4) Go to the submission directory
+cd "$PBS_O_WORKDIR"
+
+echo "=== DEBUG INFO ==="
+echo "hostname     : $(hostname)"
+echo "pwd          : $(pwd)"
+echo "which python : $(which python)"
+python -V
+
+echo
+echo "=== nvidia-smi ==="
+nvidia-smi || echo "nvidia-smi not found — not on a GPU node?"
+
+echo
+echo "=== Imports sanity ==="
+python -c "
+import torch, pycbc, gwpy, gwosc
+print('torch :', torch.__version__, '| cuda:', torch.cuda.is_available(),
+      '| device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')
+print('pycbc :', pycbc.__version__)
+print('gwpy  :', gwpy.__version__)
+print('gwosc :', gwosc.__version__)
+"
+
+echo
+echo "=== Run test_gwtorch.py ==="
+python "/rds/general/user/jc5322/home/Project/Msci-GW/hpc tests/test_gwtorch.py"
+
+echo
+echo "=== Done ==="

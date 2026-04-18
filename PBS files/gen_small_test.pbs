@@ -1,0 +1,109 @@
+#!/bin/bash
+#PBS -N gen_small_test
+#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=4:mem=16gb
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# 1) Clean module environment
+module purge
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+
+# 2) Activate venv
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+# 3) Resolve repo paths
+REPO_ROOT="/rds/general/user/jc5322/home/Project/Msci-GW"
+DATAGEN_DIR="$REPO_ROOT/HPC/Pipeline/Data Generation"
+OUTPUT_DIR="$REPO_ROOT/HPC/Pipeline/Data"
+OUTPUT_PATH="$OUTPUT_DIR/gr_small_test.pt"
+
+mkdir -p "$OUTPUT_DIR"
+cd "$DATAGEN_DIR"
+
+# 4) Debug info
+echo "=== DEBUG INFO ==="
+echo "hostname:     $(hostname)"
+echo "pwd:          $(pwd)"
+echo "which python: $(which python)"
+python -V
+python -c "import pycbc, torch, gwpy, gwosc; \
+print('pycbc', pycbc.__version__); \
+print('torch', torch.__version__); \
+print('gwpy ', gwpy.__version__); \
+print('gwosc', gwosc.__version__)"
+
+# 4b) Pre-flight: import gw_datagen so missing deps fail fast (before network)
+echo
+echo "=== Pre-flight: import gw_datagen ==="
+python -c "from gw_datagen import _cache_path, build_o4_psd_cache, pycbc_data_generator, save_dataloaders; print('gw_datagen imports OK')" || {
+    echo "ERROR: gw_datagen failed to import — install missing deps in the venv (e.g. pandas, tqdm) on the login node and resubmit."
+    exit 1
+}
+
+# 5) Download a handful of O4a PSDs for H1 + L1 (skipped if already cached).
+#    Recommended: pre-populate o4_psd_cache/ via scp from another machine
+#    so this step is a no-op and no network is needed at job time.
+echo
+echo "=== Download O4a PSDs (H1, L1; 5 segments each) ==="
+python download_o4_psds.py --detectors H1 L1 --n-segments 5 || {
+    echo "ERROR: PSD download failed. Aborting before generation step (would otherwise fall back to slow on-the-fly GWOSC fetches and time out)."
+    exit 1
+}
+
+# 6) Generate a small dataset (500 waveforms) from those PSDs
+echo
+echo "=== Generate 500 GR waveforms → $OUTPUT_PATH ==="
+OUTPUT_PATH="$OUTPUT_PATH" python <<'PY'
+import os
+import numpy as np
+from gw_datagen import pycbc_data_generator, save_dataloaders
+
+OUTPUT_PATH = os.environ['OUTPUT_PATH']
+
+CONFIG = {
+    'mass1':        lambda size: np.random.uniform(5, 90, size=size),
+    'mass2':        lambda size: np.random.uniform(5, 90, size=size),
+    'spin1z':       lambda size: np.random.uniform(-0.8, 0.8, size=size),
+    'spin2z':       lambda size: np.random.uniform(-0.8, 0.8, size=size),
+    'distance':     lambda size: np.random.uniform(100, 5000, size=size),
+    'inclination':  lambda size: np.arccos(np.random.uniform(-1, 1, size=size)),
+    'coa_phase':    lambda size: np.random.uniform(0, 2 * np.pi, size=size),
+    'ra':           lambda size: np.random.uniform(0, 2 * np.pi, size=size),
+    'dec':          lambda size: np.arcsin(np.random.uniform(-1, 1, size=size)),
+    'polarization': lambda size: np.random.uniform(0, np.pi, size=size),
+    'm_g':          lambda size: np.zeros(size),
+    'alpha_lv':     lambda size: np.zeros(size),
+    'A':            lambda size: np.zeros(size),
+}
+
+result = pycbc_data_generator(
+    config=CONFIG,
+    num_samples=500,
+    time_resolution=1 / 4096,
+    approximant='IMRPhenomD',
+    f_lower=10.0,
+    f_final=2048.0,
+    signal_length=2.0,
+    batch_size=64,
+    train_split=0.8,
+    val_split=0.1,
+    add_noise=True,
+    noise_backend='o4_psd',
+    num_workers=4,
+)
+
+save_dataloaders(result, OUTPUT_PATH)
+
+meta = result['metadata']
+print(f"\nDataset saved to {OUTPUT_PATH}")
+print(f"  Waveform shape     : {meta['waveform_shape']}")
+print(f"  Train / val / test : {meta['train_size']} / {meta['val_size']} / {meta['test_size']}")
+print(f"  Parameters         : {meta['parameter_names']}")
+PY
+EXIT_CODE=$?
+
+echo
+echo "=== Done (exit $EXIT_CODE) ==="
+exit $EXIT_CODE
