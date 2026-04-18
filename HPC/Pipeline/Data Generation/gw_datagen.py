@@ -781,15 +781,17 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     """
     Whiten a single waveform using PSD-based whitening.
 
-    Follows the PyCBC GW150914 tutorial approach.
+    Follows the PyCBC GW150914 tutorial approach. Pipeline order is
+    ``window → whiten → bandpass``:
 
-    The whitening process:
-    1. Optionally apply Tukey window to prevent edge effects
-    2. Estimate PSD via Welch (long data) or aLIGO analytic PSD (short data),
-       unless a PSD is supplied directly via the ``psd`` argument
-    3. Divide frequency-domain data by sqrt(PSD)
-    4. Convert back to time domain
-    5. Optionally apply bandpass filter (35-300 Hz)
+    1. Estimate PSD on the UNWINDOWED strain (Welch's per-segment Hann handles
+       leakage internally; pre-windowing here would scale the PSD down and
+       bias the whitening amplitude). Skipped if ``psd=`` is supplied.
+    2. Apply the Tukey window to the strain for the forward FFT so that abrupt
+       edges don't leak Gibbs ringing through the sqrt(PSD) division.
+    3. Divide frequency-domain data by sqrt(PSD).
+    4. Convert back to time domain.
+    5. Apply bandpass filter (f_lower – 300 Hz) if ``apply_bandpass=True``.
 
     Parameters
     ----------
@@ -831,20 +833,44 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
         if data.ndim != 1:
             raise ValueError(f"Expected 1D array, got shape {data.shape}")
 
-    strain = TimeSeries(data, delta_t=delta_t)
+    # Pipeline order: window → whiten → bandpass.
+    # Subtlety: the PSD is estimated from the UNWINDOWED strain (Welch applies
+    # its own per-segment Hann internally, so it is already leakage-safe), but
+    # the forward FFT for whitening must see a WINDOWED strain so that abrupt
+    # edges do not leak a broadband Gibbs ringing through the division by
+    # sqrt(PSD) that no post-filter can remove.
+    strain_raw = TimeSeries(data, delta_t=delta_t)
 
-    n_samples = len(strain)
+    n_samples = len(strain_raw)
     if psd is not None:
         pass  # use caller-supplied PSD as-is
     elif n_samples >= 8192:
         seg_len = 4096
         seg_stride = 2048
-        psd_welch = welch(strain, seg_len=seg_len, seg_stride=seg_stride)
-        psd = interpolate(psd_welch, 1.0 / strain.duration)
+        psd_welch = welch(strain_raw, seg_len=seg_len, seg_stride=seg_stride)
+        psd = interpolate(psd_welch, 1.0 / strain_raw.duration)
     else:
-        delta_f = 1.0 / strain.duration
+        delta_f = 1.0 / strain_raw.duration
         flen = n_samples // 2 + 1
         psd = aLIGOZeroDetHighPower(flen, delta_f, f_lower)
+
+    if apply_tukey:
+        n = len(data)
+        if tukey_side == 'both':
+            window = tukey(n, alpha=tukey_alpha)
+        elif tukey_side in ('left', 'right'):
+            full_window = tukey(n, alpha=tukey_alpha * 2)
+            window = np.ones(n)
+            taper_len = int(n * tukey_alpha)
+            if tukey_side == 'left':
+                window[:taper_len] = full_window[:taper_len]
+            else:
+                window[-taper_len:] = full_window[-taper_len:]
+        else:
+            raise ValueError(f"tukey_side must be 'left', 'right', or 'both', got '{tukey_side}'")
+        strain = TimeSeries(data * window, delta_t=delta_t)
+    else:
+        strain = strain_raw
 
     freq_series = strain.to_frequencyseries()
 
@@ -857,25 +883,6 @@ def whiten_waveform(waveform, delta_t=1/4096, f_lower=20.0, apply_bandpass=True,
     psd_safe = FrequencySeries(psd_array, delta_f=psd.delta_f, epoch=psd.epoch)
 
     white_strain = (freq_series / (psd_safe ** 0.5)).to_timeseries()
-
-    if apply_tukey and apply_bandpass:
-        n = len(white_strain)
-        if tukey_side == 'both':
-            window = tukey(n, alpha=tukey_alpha)
-        elif tukey_side == 'left':
-            full_window = tukey(n, alpha=tukey_alpha * 2)
-            window = np.ones(n)
-            taper_len = int(n * tukey_alpha)
-            window[:taper_len] = full_window[:taper_len]
-        elif tukey_side == 'right':
-            full_window = tukey(n, alpha=tukey_alpha * 2)
-            window = np.ones(n)
-            taper_len = int(n * tukey_alpha)
-            window[-taper_len:] = full_window[-taper_len:]
-        else:
-            raise ValueError(f"tukey_side must be 'left', 'right', or 'both', got '{tukey_side}'")
-
-        white_strain = TimeSeries(white_strain.numpy() * window, delta_t=delta_t)
 
     if apply_bandpass:
         white_strain = highpass_fir(white_strain, f_lower, 128)
@@ -2456,7 +2463,9 @@ def load_dataloaders(load_path: str, batch_size: int = None, shuffle_train: bool
     val_data = Subset(full_dataset, val_indices)
     test_data = Subset(full_dataset, test_indices)
 
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=shuffle_train)
+    # RandomSampler rejects empty datasets; disable shuffle when train is empty.
+    train_loader = DataLoader(train_data, batch_size=batch_size,
+                              shuffle=shuffle_train and len(train_data) > 0)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
 

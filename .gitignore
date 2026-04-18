@@ -12,3 +12,4 @@ HPC/test7_o4_psds_all.csv
 *.npz
 /HPC/OutputLogs
 /depreciated
+*.hdf5

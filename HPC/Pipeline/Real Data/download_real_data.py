@@ -1,20 +1,34 @@
 #!/usr/bin/env python3.11
 """
-Download, whiten, crop to 2 s, and save real LIGO events as .pt files.
+Download, whiten, crop to 2 s, and bundle real LIGO events into a single
+DataLoader-ready .pt file that matches the simulated-data schema produced by
+``gw_datagen.save_dataloaders``.
 
 Default target: all O4 events where both H1 and L1 have open data on GWOSC.
-Pass --events GW150914 GW230601_224134-v1 ... to process specific events instead.
+Pass --events GW150914 GW230601_224134-v1 ... to process specific events.
 
-Outputs (per event, written to this directory by default):
-    <EVENT>_<DET>_strain.hdf5   – raw 32 s strain, cached
-    <EVENT>_2s_real.pt          – trimmed + whitened 2 s.
-                                   X:(1, 2, 8192)      – whitened
-                                   X_raw:(1, 2, 8192)  – trimmed raw
-                                   y:(1, 13)
-    <EVENT>_strain.png          – 2×2 plot (raw vs whitened) if --plot
+Layout (under --output-dir, defaults to this script's directory):
+    hdf5/<EVENT>_<DET>_strain.hdf5     – raw 32 s strain, cached across runs
+    pt/o4_all_events_2s_real.pt        – combined dataset (see schema below)
+    plots/<EVENT>_strain.png           – optional, with --plot
 
-Combined (when --combine or default O4 run):
-    o4_all_events_2s_real.pt    – stacked X / X_raw with shape (N, 2, 8192)
+Combined .pt schema (compatible with ``gw_datagen.load_dataloaders``)::
+
+    {
+        "X":            (N, 2, 8192)  raw trimmed 2 s strain  (float32)
+        "X_whitened":   (N, 2, 8192)  whitened + bandpassed    (float32)
+        "y":            (N, 13)        parameter labels (zeros — unknown)
+        "train_indices": list[int]    (empty by default)
+        "val_indices":   list[int]    (empty by default)
+        "test_indices":  list[int]    (defaults to all N events)
+        "metadata": {
+            "parameter_names", "channels", "sample_rate", "time_resolution",
+            "signal_length", "target_length", "waveform_shape",
+            "num_samples", "batch_size",
+            "train_size", "val_size", "test_size",
+            "events", "gps_mergers", "source", "processing",
+        }
+    }
 """
 
 from __future__ import annotations
@@ -40,6 +54,7 @@ SAMPLE_RATE  = 4096
 DT           = 1 / SAMPLE_RATE
 N_2S         = 8192            # 2 s at 4096 Hz
 O4_GPS_START = 1369166418      # 2023-05-24 18:00 UTC
+COMBINED_NAME = "o4_all_events_2s_real.pt"
 
 PARAM_NAMES = [
     "mass1", "mass2", "spin1z", "spin2z", "distance",
@@ -48,6 +63,15 @@ PARAM_NAMES = [
 ]
 
 DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def layout(output_dir: str) -> dict[str, str]:
+    """Return the canonical sub-directories under ``output_dir``."""
+    return {
+        "hdf5":  os.path.join(output_dir, "hdf5"),
+        "pt":    os.path.join(output_dir, "pt"),
+        "plots": os.path.join(output_dir, "plots"),
+    }
 
 
 # ── Event discovery ───────────────────────────────────────────────────────────
@@ -82,16 +106,16 @@ def both_detectors_available(gps: float, detectors: Sequence[str] = DETECTORS,
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
-def download_strain_hdf5(event: str, gps: float, output_dir: str,
+def download_strain_hdf5(event: str, gps: float, hdf5_dir: str,
                          detectors: Sequence[str] = DETECTORS,
                          duration: float = DURATION) -> dict[str, str]:
     """Fetch raw `duration` s strain for each detector. Skip if HDF5 cached.
     Returns {detector: hdf5_path}."""
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(hdf5_dir, exist_ok=True)
     t0, t1 = gps - duration / 2, gps + duration / 2
     paths: dict[str, str] = {}
     for det in detectors:
-        path = os.path.join(output_dir, f"{event}_{det}_strain.hdf5")
+        path = os.path.join(hdf5_dir, f"{event}_{det}_strain.hdf5")
         if not os.path.exists(path):
             ts = TimeSeries.fetch_open_data(
                 det, t0, t1, sample_rate=SAMPLE_RATE, cache=True,
@@ -101,11 +125,11 @@ def download_strain_hdf5(event: str, gps: float, output_dir: str,
     return paths
 
 
-# ── Whiten + crop to 2 s .pt ──────────────────────────────────────────────────
+# ── Whiten + crop to 2 s ─────────────────────────────────────────────────────
 
 def process_to_pt(event: str, gps: float, hdf5_paths: dict[str, str]) -> dict:
-    """Whiten the full 32 s, crop to 2 s around merger, build a .pt-ready dict.
-    Returns {"X", "y", "metadata"} with X shape (1, N_detectors, N_2S)."""
+    """Whiten the full 32 s, crop to 2 s around merger. Returns a per-event
+    dict with X (raw) and X_whitened (processed), each shape (1, N_det, 8192)."""
     t_start_2 = gps - 1.0
     t_end_2   = gps + 1.0
 
@@ -131,9 +155,9 @@ def process_to_pt(event: str, gps: float, hdf5_paths: dict[str, str]) -> dict:
         strains_raw.append(full_arr[i_start:i_end].astype(np.float32))
         strains_w.append(w_full[i_start:i_end].astype(np.float32))
 
-    X     = torch.tensor(np.stack(strains_w)).unsqueeze(0)      # (1, N_det, 8192) whitened
-    X_raw = torch.tensor(np.stack(strains_raw)).unsqueeze(0)    # (1, N_det, 8192) raw trimmed
-    y     = torch.zeros(1, len(PARAM_NAMES), dtype=torch.float32)
+    X          = torch.tensor(np.stack(strains_raw)).unsqueeze(0)    # (1, D, 8192) raw
+    X_whitened = torch.tensor(np.stack(strains_w)).unsqueeze(0)      # (1, D, 8192) whitened
+    y          = torch.zeros(1, len(PARAM_NAMES), dtype=torch.float32)
 
     metadata = {
         "parameter_names": PARAM_NAMES,
@@ -151,7 +175,7 @@ def process_to_pt(event: str, gps: float, hdf5_paths: dict[str, str]) -> dict:
         "processing":      "whitened + bandpass 35–300 Hz (Tukey α=0.1)",
         "num_samples":     1,
     }
-    return {"X": X, "X_raw": X_raw, "y": y, "metadata": metadata}
+    return {"X": X, "X_whitened": X_whitened, "y": y, "metadata": metadata}
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
@@ -196,8 +220,8 @@ def plot_processed(event: str, data: dict, output_path: str) -> None:
     gps       = meta["gps_merger"]
     t         = np.arange(N_2S) * DT + (meta["window_start"] - gps)
 
-    raw_2s  = [data["X_raw"][0, i].numpy() for i in range(len(detectors))]
-    whit_2s = [data["X"][0, i].numpy()     for i in range(len(detectors))]
+    raw_2s  = [data["X"][0, i].numpy()          for i in range(len(detectors))]
+    whit_2s = [data["X_whitened"][0, i].numpy() for i in range(len(detectors))]
 
     fig, axes = plt.subplots(len(detectors), 2,
                              figsize=(14, 3 * len(detectors)), sharex=True)
@@ -232,34 +256,86 @@ def plot_processed(event: str, data: dict, output_path: str) -> None:
 def _resolve_events(requested: Sequence[str] | None) -> list[tuple[str, float]]:
     if not requested:
         return list_o4_events()
-    resolved: list[tuple[str, float]] = []
-    for name in requested:
-        resolved.append((name, event_gps(name)))
-    return resolved
+    return [(name, event_gps(name)) for name in requested]
 
 
-def run(events: Sequence[str] | None = None, output_dir: str = DIR,
-        do_plot: bool = False, do_combine: bool = True) -> list[str]:
-    """Process each event end-to-end. Returns list of event names successfully saved."""
+def _build_splits(n: int, train_frac: float, val_frac: float) -> tuple[list[int], list[int], list[int]]:
+    """Contiguous train/val/test split. Test gets the remainder."""
+    if train_frac < 0 or val_frac < 0 or train_frac + val_frac > 1:
+        raise ValueError("Invalid split: train_frac and val_frac must be ≥ 0 and sum ≤ 1")
+    n_train = int(round(n * train_frac))
+    n_val   = int(round(n * val_frac))
+    n_train = min(n_train, n)
+    n_val   = min(n_val, n - n_train)
+    train = list(range(0, n_train))
+    val   = list(range(n_train, n_train + n_val))
+    test  = list(range(n_train + n_val, n))
+    return train, val, test
+
+
+def build_combined(per_event_data: list[tuple[str, dict]],
+                   batch_size: int = 8,
+                   train_frac: float = 0.0,
+                   val_frac: float = 0.0) -> dict:
+    """Stack per-event tensors and attach the split indices + metadata.
+    Output schema matches ``gw_datagen.save_dataloaders``."""
+    X_all     = torch.cat([d["X"]          for _, d in per_event_data], dim=0)
+    Xw_all    = torch.cat([d["X_whitened"] for _, d in per_event_data], dim=0)
+    y_all     = torch.cat([d["y"]          for _, d in per_event_data], dim=0)
+
+    n = X_all.shape[0]
+    train_idx, val_idx, test_idx = _build_splits(n, train_frac, val_frac)
+
+    metadata = {
+        "parameter_names": PARAM_NAMES,
+        "channels":        DETECTORS,
+        "sample_rate":     SAMPLE_RATE,
+        "time_resolution": DT,
+        "signal_length":   2.0,
+        "target_length":   N_2S,
+        "waveform_shape":  (len(DETECTORS), N_2S),
+        "num_samples":     n,
+        "batch_size":      batch_size,
+        "train_size":      len(train_idx),
+        "val_size":        len(val_idx),
+        "test_size":       len(test_idx),
+        "events":          [e for e, _ in per_event_data],
+        "gps_mergers":     {e: d["metadata"]["gps_merger"] for e, d in per_event_data},
+        "source":          "GWOSC",
+        "processing":      "whitened + bandpass 35–300 Hz (Tukey α=0.1)",
+    }
+
+    return {
+        "X":             X_all,
+        "X_whitened":    Xw_all,
+        "y":             y_all,
+        "train_indices": train_idx,
+        "val_indices":   val_idx,
+        "test_indices":  test_idx,
+        "metadata":      metadata,
+    }
+
+
+def run(events: Sequence[str] | None = None,
+        output_dir: str = DIR,
+        do_plot: bool = False,
+        batch_size: int = 8,
+        train_frac: float = 0.0,
+        val_frac: float = 0.0) -> str | None:
+    """Download, process and bundle. Returns the combined .pt path (or None)."""
+    dirs = layout(output_dir)
+    for d in dirs.values():
+        os.makedirs(d, exist_ok=True)
+
     print("Resolving events …", flush=True)
     ev_list = _resolve_events(events)
     print(f"Target: {len(ev_list)} event(s): {[e for e, _ in ev_list]}\n")
 
-    saved: list[tuple[str, dict]] = []
+    per_event: list[tuple[str, dict]] = []
     skipped: list[str] = []
     failed:  list[str] = []
 
     for event, gps in ev_list:
-        pt_path = os.path.join(output_dir, f"{event}_2s_real.pt")
-
-        if os.path.exists(pt_path):
-            cached = torch.load(pt_path, weights_only=False)
-            if "X_raw" in cached:
-                print(f"[{event}] .pt already exists, loading …")
-                saved.append((event, cached))
-                continue
-            print(f"[{event}] existing .pt missing X_raw — regenerating")
-
         print(f"[{event}]  GPS={gps:.1f}")
         if not both_detectors_available(gps):
             print("  Skipping – H1 or L1 not available on GWOSC")
@@ -267,53 +343,39 @@ def run(events: Sequence[str] | None = None, output_dir: str = DIR,
             continue
 
         try:
-            hdf5_paths = download_strain_hdf5(event, gps, output_dir)
+            hdf5_paths = download_strain_hdf5(event, gps, dirs["hdf5"])
             data = process_to_pt(event, gps, hdf5_paths)
         except Exception as exc:
             print(f"  Failed: {exc}")
             failed.append(event)
             continue
 
-        torch.save(data, pt_path)
-        kb = os.path.getsize(pt_path) // 1024
-        print(f"  Saved → {pt_path}  ({kb} KB)")
-
         if do_plot:
-            plot_path = os.path.join(output_dir, f"{event}_strain.png")
+            plot_path = os.path.join(dirs["plots"], f"{event}_strain.png")
             plot_processed(event, data, plot_path)
             print(f"  Plot  → {plot_path}")
 
-        saved.append((event, data))
+        per_event.append((event, data))
 
-    # Combined file
-    if do_combine and saved:
-        X_all     = torch.cat([d["X"]     for _, d in saved], dim=0)
-        X_raw_all = torch.cat([d["X_raw"] for _, d in saved], dim=0)
-        y_all     = torch.cat([d["y"]     for _, d in saved], dim=0)
-        combined_meta = {
-            "parameter_names": PARAM_NAMES,
-            "channels":        DETECTORS,
-            "sample_rate":     SAMPLE_RATE,
-            "time_resolution": DT,
-            "signal_length":   2.0,
-            "target_length":   N_2S,
-            "waveform_shape":  (len(DETECTORS), N_2S),
-            "events":          [e for e, _ in saved],
-            "gps_mergers":     {e: d["metadata"]["gps_merger"] for e, d in saved},
-            "source":          "GWOSC",
-            "processing":      "whitened + bandpass 35–300 Hz (Tukey α=0.1)",
-            "num_samples":     len(saved),
-        }
-        combined_path = os.path.join(output_dir, "o4_all_events_2s_real.pt")
-        torch.save({"X": X_all, "X_raw": X_raw_all, "y": y_all,
-                    "metadata": combined_meta}, combined_path)
-        print(f"\nCombined → {combined_path}  X:{tuple(X_all.shape)}")
+    if not per_event:
+        print("\nNo events processed — nothing to save.")
+        return None
 
-    print(f"\n{'─'*60}")
-    print(f"Processed : {len(saved)}   Skipped : {len(skipped)}   Failed : {len(failed)}")
+    combined = build_combined(per_event, batch_size=batch_size,
+                              train_frac=train_frac, val_frac=val_frac)
+    combined_path = os.path.join(dirs["pt"], COMBINED_NAME)
+    torch.save(combined, combined_path)
+
+    meta = combined["metadata"]
+    kb = os.path.getsize(combined_path) // 1024
+    print(f"\nCombined → {combined_path}  ({kb} KB)")
+    print(f"  X shape     : {tuple(combined['X'].shape)}")
+    print(f"  splits      : train={meta['train_size']}, val={meta['val_size']}, test={meta['test_size']}")
+    print(f"{'─'*60}")
+    print(f"Processed : {len(per_event)}   Skipped : {len(skipped)}   Failed : {len(failed)}")
     if skipped: print(f"  skipped: {skipped}")
     if failed:  print(f"  failed : {failed}")
-    return [e for e, _ in saved]
+    return combined_path
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -324,11 +386,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--events", nargs="*", default=None,
                    help="Specific event names; default = all O4 events with H1+L1")
     p.add_argument("--output-dir", default=DIR,
-                   help=f"Output directory (default: {DIR})")
+                   help=f"Parent directory; hdf5/ and pt/ are created below it (default: {DIR})")
     p.add_argument("--plot", action="store_true",
-                   help="Save a per-event raw-vs-whitened .png")
-    p.add_argument("--no-combine", action="store_true",
-                   help="Skip writing the combined o4_all_events_2s_real.pt")
+                   help="Save a per-event raw-vs-whitened .png to plots/")
+    p.add_argument("--batch-size", type=int, default=8,
+                   help="DataLoader batch size written into metadata (default: 8)")
+    p.add_argument("--train-frac", type=float, default=0.0,
+                   help="Fraction of events in train split (default: 0.0)")
+    p.add_argument("--val-frac", type=float, default=0.0,
+                   help="Fraction of events in val split (default: 0.0 — test gets all)")
     return p.parse_args()
 
 
@@ -338,5 +404,7 @@ if __name__ == "__main__":
         events=args.events,
         output_dir=args.output_dir,
         do_plot=args.plot,
-        do_combine=not args.no_combine,
+        batch_size=args.batch_size,
+        train_frac=args.train_frac,
+        val_frac=args.val_frac,
     )

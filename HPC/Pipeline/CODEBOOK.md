@@ -374,66 +374,35 @@ Available methods: `global_standardize` (recommended), `per_sample_minmax`, `per
 - `whiten_waveform(waveform, ..., psd=None)` — PSD-based whitening + bandpass; returns `(whitened, psd_array, freqs)`. Pass `psd=` to bypass Welch estimation (recommended for simulated data — use the known generation PSD).
 - `resample_waveform(waveform, original_delta_t, target_delta_t, ...)` — anti-aliased resampling via PyCBC
 
-### Correct whitening pipeline order
+### Whitening pipeline order
 
-`whiten_waveform` supports a `tukey_side` parameter but applies the window **after** whitening and before bandpass by default. The correct order for clean output is:
+`whiten_waveform` now runs `window → whiten → bandpass` internally. Two
+subtleties:
 
-```
-window → whiten → bandpass
-```
+1. The Welch PSD estimator sees the **unwindowed** strain — its own per-segment
+   Hann handles leakage. Pre-windowing the input to Welch would scale the
+   estimated PSD down and overshoot the sqrt(PSD) division.
+2. The forward FFT for whitening sees the **windowed** strain, so abrupt edges
+   don't leak Gibbs ringing through the division.
 
-Pre-applying the Tukey window to the raw signal before passing it to `whiten_waveform` ensures that:
-1. The Welch PSD estimator sees a discontinuity-free signal (better PSD estimate)
-2. The bandpass FIR filter receives cleanly windowed input (no edge ringing)
+Passing `apply_tukey=True, apply_bandpass=True` gives that full order. Both
+the simulated (`save_dataloaders` → `_whiten_batch`) and real-data
+(`download_real_data.process_to_pt`) pipelines rely on this.
 
-**Single waveform:**
 ```python
-from scipy.signal.windows import tukey
-
-window = tukey(len(waveform), alpha=0.1)
 whitened, psd, freqs = whiten_waveform(
-    waveform * window,
+    waveform,
     delta_t=1/4096,
-    f_lower=40.0,
-    apply_bandpass=True,
-    apply_tukey=False,   # window already applied
+    f_lower=20.0,
+    apply_tukey=True,      # window strain into the forward FFT
+    tukey_alpha=0.1,       # 10% tapered on each side
+    tukey_side='both',
+    apply_bandpass=True,   # FIR bandpass 35–300 Hz after whitening
 )
 ```
 
-**Full dataset (DataLoader result):**
-
-Pre-window the tensors first, then call `whiten_dataloaders` with `apply_tukey=False`:
-
-```python
-from scipy.signal.windows import tukey
-from torch.utils.data import DataLoader, Subset, TensorDataset
-import torch, numpy as np
-
-def prewindow_result(result, alpha=0.1):
-    train_ds = result["train_loader"].dataset
-    base_ds  = train_ds.dataset
-    X = base_ds.tensors[0].clone().float()       # (N, D, T)
-    y = base_ds.tensors[1]
-    win = torch.from_numpy(tukey(X.shape[2], alpha=alpha).astype(np.float32))
-    X   = X * win                                # broadcast over (N, D)
-    new_ds     = TensorDataset(X, y)
-    batch_size = result["metadata"].get("batch_size", 8)
-    return {
-        "train_loader": DataLoader(Subset(new_ds, train_ds.indices),
-                                   batch_size=batch_size, shuffle=True),
-        "val_loader":   DataLoader(Subset(new_ds, result["val_loader"].dataset.indices),
-                                   batch_size=batch_size, shuffle=False),
-        "test_loader":  DataLoader(Subset(new_ds, result["test_loader"].dataset.indices),
-                                   batch_size=batch_size, shuffle=False),
-        "metadata": result["metadata"].copy(),
-    }
-
-whitened_result = whiten_dataloaders(
-    prewindow_result(result),
-    f_lower=40.0,
-    apply_tukey=False,   # window already applied
-)
-```
+Set `apply_tukey=False` only when the input is already windowed (e.g. a signal
+that has been end-tapered by `_apply_end_taper` and has guaranteed-zero edges).
 
 ---
 
@@ -506,11 +475,133 @@ loaded = load_dataloaders('dataset.pt', batch_size=64)  # override batch size
 ```
 
 **What is saved** (via `torch.save`):
-- `X` and `y` tensors (full dataset, not split)
+- `X` — raw signal+noise tensor `(N, D, T)` float32
+- `X_whitened` — whitened + bandpassed (35–300 Hz, Tukey α=0.1) counterpart, same shape. Computed once at save time via `_whiten_batch`; not exposed by `load_dataloaders` — access with `torch.load(path, weights_only=False)["X_whitened"]`.
+- `y` tensor (full dataset, not split)
 - `train_indices`, `val_indices`, `test_indices` — integer index lists
 - `metadata` dict
 
-Loading reconstructs the exact same split using `torch.utils.data.Subset`. The tensor round-trip is exact (`torch.equal` passes).
+Loading reconstructs the exact same split using `torch.utils.data.Subset`. The tensor round-trip is exact (`torch.equal` passes). When `train_indices` is empty (e.g. real-data files saved with everything in test), `load_dataloaders` silently disables shuffle on the train loader so `DataLoader` does not trip `RandomSampler`'s non-empty requirement.
+
+---
+
+## Real Data Pipeline
+
+**File:** `HPC/Pipeline/Real Data/download_real_data.py`
+**Purpose:** Download real LIGO O4 events from GWOSC, process them into the same `.pt` schema as the simulated pipeline, so both feed into `load_dataloaders` without any adapter.
+
+### Order of operations (per event)
+
+```
+1. Download    → 32 s HDF5 for H1 and L1 via TimeSeries.fetch_open_data
+                 (cached under hdf5/; skipped on re-run)
+2. Whiten      → whiten_waveform() on the FULL 32 s strain
+                 (bandpass 35–300 Hz, Tukey α=0.1 both sides)
+3. Crop        → slice a 2 s window centred on the GPS merger time
+                 → 8192 samples (N_2S)
+4. Save        → stack across events, build combined dict, torch.save
+```
+
+The order matters: whitening uses the full 32 s because the Welch PSD estimator needs a long segment for a clean spectral estimate. Cropping to 2 s first would force `whiten_waveform` onto the analytic aLIGO fallback and distort low-frequency content. Both the raw and whitened arrays are cropped from the same `[i_start:i_end]` indices, so they stay aligned.
+
+### Folder layout
+
+Under `--output-dir` (default: the script's directory):
+
+```
+hdf5/<EVENT>_H1_strain.hdf5       ← cached raw 32 s strain
+hdf5/<EVENT>_L1_strain.hdf5
+pt/o4_all_events_2s_real.pt       ← combined dataset (load_dataloaders-ready)
+plots/<EVENT>_strain.png          ← only with --plot
+```
+
+Running the script is idempotent: HDF5 caches skip re-download; the combined `.pt` is rebuilt every run from whatever HDF5 pairs are present.
+
+### Combined `.pt` schema
+
+Identical top-level keys to `save_dataloaders` output:
+
+```python
+{
+    "X":             (N, 2, 8192) float32,   # raw trimmed 2 s
+    "X_whitened":    (N, 2, 8192) float32,   # whitened + bandpassed
+    "y":             (N, 13) float32 zeros,  # unknown labels
+    "train_indices": [],                     # defaults put all in test
+    "val_indices":   [],
+    "test_indices":  list(range(N)),
+    "metadata": {
+        "parameter_names", "channels", "sample_rate", "time_resolution",
+        "signal_length", "target_length", "waveform_shape",
+        "num_samples", "batch_size",
+        "train_size", "val_size", "test_size",
+        "events",       # list of event names
+        "gps_mergers",  # {event: gps}
+        "source", "processing",
+    }
+}
+```
+
+`y` is zero-filled because physical parameters are unknown for real events; the 13 columns match `parameter_names` from the simulated pipeline so downstream models see a uniform label dimension.
+
+### CLI
+
+```bash
+cd "Msci-GW/HPC/Pipeline/Real Data"
+
+# All O4 events where both H1 and L1 have open data on GWOSC:
+python download_real_data.py
+
+# Specific events:
+python download_real_data.py --events GW150914 GW230601_224134-v1
+
+# With per-event raw-vs-whitened diagnostic plots:
+python download_real_data.py --plot
+
+# Override splits (default puts all events in test):
+python download_real_data.py --train-frac 0.7 --val-frac 0.15
+```
+
+Flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--events` | (all O4) | Specific event names; omit for full O4 catalogue scan |
+| `--output-dir` | script dir | Parent of `hdf5/` / `pt/` / `plots/` |
+| `--plot` | off | Write `plots/<event>_strain.png` per event |
+| `--batch-size` | 8 | Batch size stored in metadata (affects `load_dataloaders`) |
+| `--train-frac` | 0.0 | Fraction of events in train split |
+| `--val-frac` | 0.0 | Fraction of events in val split (test = remainder) |
+
+### Key constants (match `download_real_data.py`)
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `DETECTORS` | `["H1", "L1"]` | Detectors downloaded per event |
+| `DURATION` | 32 s | Window fetched + whitened |
+| `SAMPLE_RATE` | 4096 Hz | Strain sample rate |
+| `N_2S` | 8192 | Samples in the 2 s crop (matches simulated `target_length`) |
+| `O4_GPS_START` | 1369166418 | Filter threshold for `list_o4_events()` |
+| `COMBINED_NAME` | `o4_all_events_2s_real.pt` | Output filename under `pt/` |
+
+### Public API
+
+Callable directly from Python (e.g. from tests):
+
+```python
+from download_real_data import (
+    list_o4_events,              # [(event, gps), ...] GPS ≥ O4_GPS_START
+    both_detectors_available,    # (gps) → bool via gwosc.locate.get_urls
+    download_strain_hdf5,        # cache-aware: returns {det: path}
+    process_to_pt,               # (event, gps, hdf5_paths) → per-event dict
+    build_combined,              # [(event, data)] → combined dict
+    run,                         # orchestrates everything; returns .pt path
+    layout,                      # (output_dir) → {hdf5, pt, plots}
+    plot_raw_strain,             # (event, gps, hdf5_paths, out_path)
+    plot_processed,              # (event, data, out_path) raw vs whitened 2x2
+)
+```
+
+`run()` is the only function that hits the network (via `list_o4_events` + `download_strain_hdf5`). Tests that want to stay offline should call `process_to_pt` + `build_combined` directly against cached HDF5 pairs — see `test_download_real_data.py`.
 
 ---
 
@@ -520,8 +611,10 @@ Loading reconstructs the exact same split using `torch.utils.data.Subset`. The t
 
 | File | Covers |
 |------|--------|
-| `test_analytic.py` | GR, MG, LV with analytic aLIGO noise; save/load round-trip; plots |
-| `test_o4_real.py` | O4 PSD cache validation; GR, MG, LV with real O4 noise; save/load; plots |
+| `test_analytic.py` | GR, MG, LV with analytic aLIGO noise; save/load round-trip; `X_whitened` save; plots |
+| `test_o4_real.py` | O4 PSD cache validation; GR, MG, LV with real O4 noise; save/load; `X_whitened` save; plots |
+| `test_download_real_data.py` | Real-data pipeline on cached HDF5s (no network): layout, combined-pt schema, `load_dataloaders` compatibility, raw-strain plot |
+| `test_real_vs_sim_plot.py` | End-to-end cross-check: loads one simulated and one real `.pt` through the same `load_dataloaders`; writes `plots/real_vs_sim_h1.png` (raw + whitened, 2×2) |
 | `conftest.py` | Shared fixtures: `small_config`, `base_kwargs`, `aligo_kwargs`, `psd_cache_dir` |
 
 ```bash

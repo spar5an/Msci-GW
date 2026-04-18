@@ -64,14 +64,24 @@ VAL_SPLIT    = 0.1
 # ── END OF CONFIG SECTION ─────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    # Astrophysical parameters — sampled identically for all modes
+    # Astrophysical parameters — ranges informed by the GWTC-3 catalogue of BBH
+    # detections (Abbott et al. 2023, arXiv:2111.03606). Bounds are broad enough
+    # to cover the observed population while tight enough to avoid wasting
+    # samples on regions with no detected events.
+    #
+    # Source-frame components:
+    #   mass1, mass2    : [5, 90] M_sun          (GWTC-3 observed BBH range)
+    #   spin1z, spin2z  : [-0.8, 0.8]            (generous — most events |chi| < 0.5)
+    #   distance        : [100, 5000] Mpc        (BBH luminosity distance range)
+    # Geometric / nuisance parameters use isotropic priors (cosine-uniform
+    # inclination, sine-uniform declination).
     CONFIG = {
-        'mass1':        lambda size: np.random.uniform(10, 50, size=size),
-        'mass2':        lambda size: np.random.uniform(10, 50, size=size),
-        'spin1z':       lambda size: np.random.uniform(-0.99, 0.99, size=size),
-        'spin2z':       lambda size: np.random.uniform(-0.99, 0.99, size=size),
-        'distance':     lambda size: np.random.uniform(100, 1000, size=size),
-        'inclination':  lambda size: np.random.uniform(0, np.pi, size=size),
+        'mass1':        lambda size: np.random.uniform(5, 90, size=size),
+        'mass2':        lambda size: np.random.uniform(5, 90, size=size),
+        'spin1z':       lambda size: np.random.uniform(-0.8, 0.8, size=size),
+        'spin2z':       lambda size: np.random.uniform(-0.8, 0.8, size=size),
+        'distance':     lambda size: np.random.uniform(100, 5000, size=size),
+        'inclination':  lambda size: np.arccos(np.random.uniform(-1, 1, size=size)),
         'coa_phase':    lambda size: np.random.uniform(0, 2 * np.pi, size=size),
         'ra':           lambda size: np.random.uniform(0, 2 * np.pi, size=size),
         'dec':          lambda size: np.arcsin(np.random.uniform(-1, 1, size=size)),

@@ -1,12 +1,17 @@
 """
-test_download_real_data.py — short smoke test for the real-data downloader.
+test_download_real_data.py — offline smoke test for the real-data pipeline.
 
-Downloads raw 32 s HDF5 strain for a small number of O4 events (where both H1
-and L1 are online), trims to 2 s around merger, whitens, saves .pt files, and
-plots both the raw 32 s strain and the processed (raw 2 s vs whitened 2 s)
-waveforms.
+Runs the processing half of ``download_real_data`` against the HDF5 files
+already cached under ``HPC/Pipeline/Real Data/hdf5/``. No network access.
+Confirms:
 
-Requires network access to GWOSC; the module is skipped if GWOSC is unreachable.
+  * the combined .pt is load_dataloaders-compatible (gw_datagen can consume it
+    and iterate the DataLoaders);
+  * every per-sample tensor is finite, shaped as expected, and whitened tensors
+    actually differ from the raw ones;
+  * the raw strain plot is written for a cached event.
+
+Skipped if no cached HDF5 pairs (H1+L1) are present.
 
 Run with:
     pytest test_download_real_data.py -v
@@ -28,116 +33,173 @@ _REAL_DATA_DIR = (
 sys.path.insert(0, str(_REAL_DATA_DIR))
 
 from download_real_data import (  # noqa: E402
+    COMBINED_NAME,
     DURATION,
     N_2S,
     SAMPLE_RATE,
-    both_detectors_available,
-    download_strain_hdf5,
-    list_o4_events,
-    plot_processed,
+    build_combined,
+    layout,
     plot_raw_strain,
     process_to_pt,
 )
-from conftest import PLOTS_DIR  # noqa: E402
+from gw_datagen import load_dataloaders  # noqa: E402
 
-N_EVENTS = 2  # keep the test short
+CACHED_HDF5_DIR = _REAL_DATA_DIR / "hdf5"
+N_EVENTS = 2       # keep the test short
+BATCH_SIZE = 2
+
+
+def _discover_cached_events(hdf5_dir: Path) -> dict[str, float]:
+    """Scan ``hdf5_dir`` for <EVENT>_H1/L1_strain.hdf5 pairs. Return
+    {event: gps_merger} using the HDF5 t0 attribute (gps = t0 + DURATION/2)."""
+    events: dict[str, float] = {}
+    for h1 in hdf5_dir.glob("*_H1_strain.hdf5"):
+        event = h1.name[: -len("_H1_strain.hdf5")]
+        l1 = hdf5_dir / f"{event}_L1_strain.hdf5"
+        if not l1.exists():
+            continue
+        ts = TimeSeries.read(str(h1))
+        events[event] = float(ts.t0.value) + DURATION / 2
+    return events
 
 
 @pytest.fixture(scope="module")
-def downloaded(tmp_path_factory):
-    """Download HDF5, trim to 2 s, whiten, and save .pt for a few O4 events."""
-    out_dir = tmp_path_factory.mktemp("real_data_download")
+def ran(tmp_path_factory):
+    """Process cached HDF5 files end-to-end — zero network."""
+    if not CACHED_HDF5_DIR.is_dir():
+        pytest.skip(f"No cached hdf5 directory at {CACHED_HDF5_DIR}")
 
-    try:
-        events = list_o4_events()
-    except Exception as exc:
-        pytest.skip(f"Could not reach GWOSC to list events: {exc}")
+    available = _discover_cached_events(CACHED_HDF5_DIR)
+    if not available:
+        pytest.skip(f"No cached H1+L1 pairs under {CACHED_HDF5_DIR}")
 
-    collected = []
-    for event, gps in events:
-        if len(collected) >= N_EVENTS:
-            break
-        try:
-            if not both_detectors_available(gps):
-                continue
-            paths = download_strain_hdf5(event, gps, str(out_dir))
-            data  = process_to_pt(event, gps, paths)
-        except Exception:
-            continue
-        pt_path = os.path.join(str(out_dir), f"{event}_2s_real.pt")
-        torch.save(data, pt_path)
-        collected.append((event, gps, paths, data, pt_path))
+    chosen = list(available.items())[:N_EVENTS]
 
-    if not collected:
-        pytest.skip("No O4 events could be downloaded (network or GWOSC issue)")
-    return collected
+    out_dir = str(tmp_path_factory.mktemp("real_data_cached"))
+    dirs = layout(out_dir)
+    for d in dirs.values():
+        os.makedirs(d, exist_ok=True)
+
+    # Symlink cached HDF5 into the temp layout so downstream code sees the
+    # canonical hdf5/ folder.
+    for event, _ in chosen:
+        for det in ("H1", "L1"):
+            src = CACHED_HDF5_DIR / f"{event}_{det}_strain.hdf5"
+            dst = Path(dirs["hdf5"]) / f"{event}_{det}_strain.hdf5"
+            if not dst.exists():
+                os.symlink(src, dst)
+
+    per_event = []
+    for event, gps in chosen:
+        hdf5_paths = {
+            det: os.path.join(dirs["hdf5"], f"{event}_{det}_strain.hdf5")
+            for det in ("H1", "L1")
+        }
+        per_event.append((event, process_to_pt(event, gps, hdf5_paths)))
+
+    combined = build_combined(per_event, batch_size=BATCH_SIZE)
+    combined_path = os.path.join(dirs["pt"], COMBINED_NAME)
+    torch.save(combined, combined_path)
+
+    return {
+        "out_dir":       out_dir,
+        "dirs":          dirs,
+        "combined_path": combined_path,
+        "events":        [e for e, _ in chosen],
+        "gps_lookup":    dict(chosen),
+    }
 
 
-class TestDownload:
-    def test_hdf5_files_exist(self, downloaded):
-        for _, _, paths, _, _ in downloaded:
-            assert set(paths.keys()) == {"H1", "L1"}
-            for path in paths.values():
-                assert os.path.isfile(path)
+class TestLayout:
+    def test_subfolders_exist(self, ran):
+        for key in ("hdf5", "pt"):
+            assert os.path.isdir(ran["dirs"][key])
 
-    def test_hdf5_length_matches_duration(self, downloaded):
+    def test_hdf5_files_exist(self, ran):
         expected = DURATION * SAMPLE_RATE
-        for _, _, paths, _, _ in downloaded:
-            for path in paths.values():
-                ts = TimeSeries.read(path)
-                assert len(ts) == expected
+        for event in ran["events"]:
+            for det in ("H1", "L1"):
+                path = os.path.join(ran["dirs"]["hdf5"], f"{event}_{det}_strain.hdf5")
+                assert os.path.isfile(path)
+                assert len(TimeSeries.read(path)) == expected
 
-    def test_hdf5_start_covers_merger(self, downloaded):
-        for _, gps, paths, _, _ in downloaded:
-            for path in paths.values():
-                ts = TimeSeries.read(path)
-                t0 = float(ts.t0.value)
-                t1 = t0 + len(ts) / SAMPLE_RATE
-                assert t0 <= gps <= t1
+    def test_combined_pt_exists(self, ran):
+        path = os.path.join(ran["dirs"]["pt"], COMBINED_NAME)
+        assert path == ran["combined_path"]
+        assert os.path.isfile(path)
 
 
-class TestProcess:
-    def test_shapes(self, downloaded):
-        for _, _, _, data, _ in downloaded:
-            assert data["X"].shape     == (1, 2, N_2S)
-            assert data["X_raw"].shape == (1, 2, N_2S)
-            assert data["y"].shape     == (1, 13)
+class TestCombinedSchema:
+    def test_top_level_keys(self, ran):
+        blob = torch.load(ran["combined_path"], weights_only=False)
+        assert set(blob.keys()) >= {
+            "X", "X_whitened", "y",
+            "train_indices", "val_indices", "test_indices",
+            "metadata",
+        }
 
-    def test_finite_and_nonzero(self, downloaded):
-        for _, _, _, data, _ in downloaded:
-            for key in ("X", "X_raw"):
-                X = data[key]
-                assert torch.isfinite(X).all(), f"{key} has non-finite entries"
-                assert X.abs().sum().item() > 0
+    def test_shapes(self, ran):
+        blob = torch.load(ran["combined_path"], weights_only=False)
+        n = len(ran["events"])
+        assert blob["X"].shape          == (n, 2, N_2S)
+        assert blob["X_whitened"].shape == (n, 2, N_2S)
+        assert blob["y"].shape          == (n, 13)
 
-    def test_whitened_differs_from_raw(self, downloaded):
-        # Whitening should materially change amplitude distribution; a whitened
-        # strain is O(1) while a raw interferometer strain is O(1e-21).
-        for _, _, _, data, _ in downloaded:
-            assert not torch.equal(data["X"], data["X_raw"])
-            raw_std = data["X_raw"].std().item()
-            whi_std = data["X"].std().item()
-            assert whi_std > raw_std * 1e10
+    def test_whitened_differs_from_raw(self, ran):
+        blob = torch.load(ran["combined_path"], weights_only=False)
+        assert not torch.equal(blob["X_whitened"], blob["X"])
+        # Raw strain is O(1e-21); whitened is O(1). A ratio collapse would mean
+        # the whitening step silently did nothing.
+        assert blob["X_whitened"].std().item() > blob["X"].std().item() * 1e10
 
-    def test_pt_roundtrip(self, downloaded):
-        for _, _, _, data, pt_path in downloaded:
-            loaded = torch.load(pt_path, weights_only=False)
-            assert set(loaded.keys()) >= {"X", "X_raw", "y", "metadata"}
-            assert torch.equal(loaded["X"],     data["X"])
-            assert torch.equal(loaded["X_raw"], data["X_raw"])
+    def test_finite(self, ran):
+        blob = torch.load(ran["combined_path"], weights_only=False)
+        for key in ("X", "X_whitened", "y"):
+            assert torch.isfinite(blob[key]).all(), f"{key} has non-finite entries"
+
+    def test_default_splits_put_everything_in_test(self, ran):
+        blob = torch.load(ran["combined_path"], weights_only=False)
+        n = blob["X"].shape[0]
+        assert blob["train_indices"] == []
+        assert blob["val_indices"]   == []
+        assert list(blob["test_indices"]) == list(range(n))
+
+    def test_metadata_has_dataloader_keys(self, ran):
+        meta = torch.load(ran["combined_path"], weights_only=False)["metadata"]
+        for key in ("num_samples", "waveform_shape", "channels",
+                    "train_size", "val_size", "test_size",
+                    "batch_size", "time_resolution"):
+            assert key in meta
+
+
+class TestLoadDataloaders:
+    """The combined .pt should be consumable by gw_datagen.load_dataloaders."""
+
+    def test_load_returns_dataloaders(self, ran):
+        loaded = load_dataloaders(ran["combined_path"])
+        assert set(loaded.keys()) == {"train_loader", "val_loader", "test_loader", "metadata"}
+
+    def test_test_loader_yields_expected_batches(self, ran):
+        loaded = load_dataloaders(ran["combined_path"])
+        batches = list(loaded["test_loader"])
+        assert len(batches) >= 1
+        X, y = batches[0]
+        assert X.dim() == 3 and X.shape[1:] == (2, N_2S)
+        assert y.shape[1] == 13
+
+    def test_train_and_val_loaders_are_empty(self, ran):
+        loaded = load_dataloaders(ran["combined_path"])
+        assert len(list(loaded["train_loader"])) == 0
+        assert len(list(loaded["val_loader"]))   == 0
 
 
 class TestPlot:
-    def test_plot_raw_strain(self, downloaded):
-        os.makedirs(PLOTS_DIR, exist_ok=True)
-        for event, gps, paths, _, _ in downloaded:
-            out = os.path.join(PLOTS_DIR, f"raw_{event}.png")
-            plot_raw_strain(event, gps, paths, out)
-            assert os.path.isfile(out) and os.path.getsize(out) > 0
-
-    def test_plot_processed(self, downloaded):
-        os.makedirs(PLOTS_DIR, exist_ok=True)
-        for event, _, _, data, _ in downloaded:
-            out = os.path.join(PLOTS_DIR, f"processed_{event}.png")
-            plot_processed(event, data, out)
-            assert os.path.isfile(out) and os.path.getsize(out) > 0
+    def test_plot_raw_strain_runs(self, ran, tmp_path):
+        hdf5_dir = ran["dirs"]["hdf5"]
+        event    = ran["events"][0]
+        gps      = ran["gps_lookup"][event]
+        paths    = {det: os.path.join(hdf5_dir, f"{event}_{det}_strain.hdf5")
+                    for det in ("H1", "L1")}
+        out = tmp_path / f"raw_{event}.png"
+        plot_raw_strain(event, gps, paths, str(out))
+        assert out.exists() and out.stat().st_size > 0
