@@ -141,6 +141,13 @@ def process_to_pt(event: str, gps: float, hdf5_paths: dict[str, str]) -> dict:
         full     = TimeSeries.read(hdf5_paths[det])
         full_arr = full.value.astype(np.float64)
 
+        n_nan = int(np.isnan(full_arr).sum()) + int(np.isinf(full_arr).sum())
+        if n_nan > 0:
+            raise ValueError(
+                f"{event} [{det}]: raw strain has {n_nan} non-finite samples "
+                f"(GWOSC data gap) — dropping event"
+            )
+
         w_full, _, _ = whiten_waveform(
             full_arr, delta_t=DT, f_lower=20.0,
             apply_bandpass=True, apply_tukey=True,
