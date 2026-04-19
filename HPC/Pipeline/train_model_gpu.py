@@ -38,6 +38,7 @@ from train_model_cpu import (
     build_checkpoint_path,
     crop_to_merger,  # noqa: F401 (exposed for downstream imports)
     load_dataset_pt,
+    resolve_crop_for_embedding,
 )
 
 
@@ -52,11 +53,44 @@ if DEVICE.type == 'cuda':
 # DEFAULT_CONFIG, so only the keys we override live here.
 GPU_DEFAULT_CONFIG = {
     **DEFAULT_CONFIG,
-    'batch_size':     128,    # GPU amortises kernel launch — go wider
-    'val_chunk_size': 128,    # chunk val forward pass to avoid OOM
+    # 256 is a safe default for a 48 GB L40 at AMP bf16 + full dataset on
+    # device. Drop to 128 if conv1d with a long window OOMs.
+    'batch_size':     256,
+    'val_chunk_size': 256,    # chunked val forward pass (bounds memory)
+    # Mixed precision + throughput knobs. All no-ops on CPU.
+    'use_amp':        True,   # bfloat16 autocast on CUDA (no GradScaler needed)
+    'allow_tf32':     True,   # TF32 matmuls on Ampere+
+    'cudnn_benchmark': True,  # cuDNN autotuner — helps conv/LSTM
     'compile_model':  False,  # torch.compile — opt-in per run
-    'device_tag':     'gpu',
+    # Drop the final short batch when True. Required for compile_model=True
+    # (CUDA graphs dislike dynamic shapes); otherwise optional.
+    'drop_last_batch': False,
+    'log_file':        None,  # optional path; stdout is mirrored to it
+    'device_tag':      'gpu',
 }
+
+
+def _configure_cuda_flags(cfg):
+    """TF32 + cuDNN benchmark switches. Must run before model build."""
+    if DEVICE.type != 'cuda':
+        return
+    if cfg.get('allow_tf32', True):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    if cfg.get('cudnn_benchmark', True):
+        torch.backends.cudnn.benchmark = True
+
+
+class _Tee:
+    """Mirror stdout writes to an extra file handle. Used by log_file."""
+    def __init__(self, *streams):
+        self._streams = streams
+    def write(self, s):
+        for st in self._streams:
+            st.write(s)
+    def flush(self):
+        for st in self._streams:
+            st.flush()
 
 
 def _seed_everything_gpu(seed):
@@ -66,20 +100,34 @@ def _seed_everything_gpu(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def _chunked_val_logprob(model, val_params, val_data, chunk_size):
-    """Mean log-prob over the val split, computed in chunks to bound memory."""
+def _chunked_val_logprob(model, val_params, val_data, chunk_size,
+                         use_amp=False, device_type='cuda'):
+    """Mean log-prob over the val split, computed in chunks to bound memory.
+
+    Wraps the forward in `torch.autocast(bfloat16)` when use_amp is True to
+    match training precision — otherwise the val number drifts relative to
+    train because the model runs under different dtype.
+    """
     totals, counts = 0.0, 0
     model.eval()
+    autocast_ctx = (torch.autocast(device_type=device_type, dtype=torch.bfloat16)
+                    if use_amp else _NullCtx())
     with torch.inference_mode():
-        for i in range(0, val_data.shape[0], chunk_size):
-            p = val_params[i:i + chunk_size]
-            d = val_data[i:i + chunk_size]
-            lp = model(p, d)
-            if torch.isnan(lp).any() or torch.isinf(lp).any():
-                continue
-            totals += float(lp.sum().item())
-            counts += int(lp.shape[0])
+        with autocast_ctx:
+            for i in range(0, val_data.shape[0], chunk_size):
+                p = val_params[i:i + chunk_size]
+                d = val_data[i:i + chunk_size]
+                lp = model(p, d)
+                if torch.isnan(lp).any() or torch.isinf(lp).any():
+                    continue
+                totals += float(lp.sum().item())
+                counts += int(lp.shape[0])
     return totals / counts if counts > 0 else float('nan')
+
+
+class _NullCtx:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
 
 
 def train_dingo_model_gpu(model, train_params, train_data,
@@ -88,6 +136,9 @@ def train_dingo_model_gpu(model, train_params, train_data,
                           weight_decay=1e-4,
                           val_params=None, val_data=None,
                           val_chunk_size=128,
+                          train_weights=None,
+                          use_amp=False,
+                          drop_last_batch=False,
                           extra_patience_after_scheduler=3,
                           checkpoint_path=None,
                           checkpoint_extras=None,
@@ -111,6 +162,8 @@ def train_dingo_model_gpu(model, train_params, train_data,
     if val_params is not None:
         val_params = val_params.to(device, non_blocking=True)
         val_data   = val_data.to(device, non_blocking=True)
+    if train_weights is not None:
+        train_weights = train_weights.to(device, non_blocking=True)
 
     print(f"\nData stats:")
     print(f"  train_params: min={train_params.min():.4f}, max={train_params.max():.4f}, "
@@ -132,12 +185,19 @@ def train_dingo_model_gpu(model, train_params, train_data,
     num_samples = len(train_params)
     has_val = val_params is not None and val_data is not None
 
+    amp_enabled = bool(use_amp) and device.type == 'cuda'
+    device_type = 'cuda' if device.type == 'cuda' else 'cpu'
+
     print(f"\nTraining for up to {num_epochs} epochs  (device={device})")
     print(f"  Early-stop patience: {patience}  "
           f"(scheduler.patience={scheduler.patience} + extra={extra_patience_after_scheduler})")
     print(f"  Samples: {num_samples}  Batch: {batch_size}  "
-          f"Val chunk: {val_chunk_size}")
+          f"Val chunk: {val_chunk_size}  drop_last={drop_last_batch}")
+    print(f"  AMP (bf16): {amp_enabled}")
     print(f"  lr={lr}  weight_decay={weight_decay}")
+    if train_weights is not None:
+        print(f"  Train weights: mean={train_weights.mean():.3f}, "
+              f"min={train_weights.min():.3f}, max={train_weights.max():.3f}")
     if checkpoint_path is not None:
         print(f"  Persisting best model on each improvement: {checkpoint_path}")
     if start_epoch > 0:
@@ -159,8 +219,11 @@ def train_dingo_model_gpu(model, train_params, train_data,
         batch_log_probs = []
 
         indices = torch.randperm(num_samples, device=device)
+        # Drop the trailing short batch when requested (required for
+        # torch.compile CUDA graphs — dynamic shapes force recompilation).
+        end = (num_samples // batch_size) * batch_size if drop_last_batch else num_samples
 
-        for i in range(0, num_samples, batch_size):
+        for i in range(0, end, batch_size):
             batch_indices = indices[i:min(i + batch_size, num_samples)]
             batch_params = train_params[batch_indices]
             batch_data = train_data[batch_indices]
@@ -169,8 +232,14 @@ def train_dingo_model_gpu(model, train_params, train_data,
 
             optimizer.zero_grad(set_to_none=True)
 
-            log_prob = model(batch_params, batch_data)
-            loss = -log_prob.mean()
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16,
+                                enabled=amp_enabled):
+                log_prob = model(batch_params, batch_data)
+                if train_weights is not None:
+                    w = train_weights[batch_indices]
+                    loss = -(w * log_prob).mean()
+                else:
+                    loss = -log_prob.mean()
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"  NaN/Inf loss at epoch {epoch+1}, batch {i//batch_size + 1} — skipped")
@@ -191,7 +260,8 @@ def train_dingo_model_gpu(model, train_params, train_data,
         avg_val_log_prob = float('nan')
         if has_val:
             avg_val_log_prob = _chunked_val_logprob(
-                model, val_params, val_data, val_chunk_size
+                model, val_params, val_data, val_chunk_size,
+                use_amp=amp_enabled, device_type=device_type,
             )
             val_losses.append(avg_val_log_prob)
 
@@ -231,9 +301,14 @@ def train_dingo_model_gpu(model, train_params, train_data,
         current_lr = optimizer.param_groups[0]['lr']
         batch_std = float(np.std(batch_log_probs)) if batch_log_probs else float('nan')
         val_str = f", Val: {avg_val_log_prob:7.4f}" if has_val else ""
+        mem_str = ""
+        if device.type == 'cuda':
+            mem_gb = torch.cuda.max_memory_allocated(device) / 1e9
+            mem_str = f", VRAM: {mem_gb:4.1f}GB"
+            torch.cuda.reset_peak_memory_stats(device)
         print(f"Epoch {epoch+1:3d}/{num_epochs}, Train: {avg_log_prob:7.4f}{val_str}, "
               f"Best: {best_log_prob:7.4f} @ ep{best_epoch}, Std: {batch_std:6.4f}, "
-              f"LR: {current_lr:.2e}{marker}")
+              f"LR: {current_lr:.2e}{mem_str}{marker}")
 
         if bad_epochs >= patience:
             print(f"\nEarly stop: no improvement for {patience} epochs "
@@ -248,17 +323,43 @@ def train_dingo_model_gpu(model, train_params, train_data,
 
 def run_training(config=None):
     """GPU-side counterpart to `train_model_cpu.run_training`. Same contract."""
+    import sys
     cfg = {**GPU_DEFAULT_CONFIG, **(config or {})}
     dev = DEVICE
     _seed_everything_gpu(cfg['seed'])
+    _configure_cuda_flags(cfg)
 
+    # Optional log-file mirroring. Stdout is the canonical stream; the log
+    # file is a parallel copy so PBS stdout redirect can coexist with a
+    # per-run trace that hp_search.py consumes.
+    log_fh = None
+    original_stdout = sys.stdout
+    if cfg.get('log_file'):
+        os.makedirs(os.path.dirname(cfg['log_file']) or '.', exist_ok=True)
+        log_fh = open(cfg['log_file'], 'a', buffering=1)  # line-buffered
+        sys.stdout = _Tee(original_stdout, log_fh)
+        print(f"[run_training] Mirroring stdout → {cfg['log_file']}")
+
+    try:
+        return _run_training_impl(cfg, dev)
+    finally:
+        if log_fh is not None:
+            sys.stdout = original_stdout
+            log_fh.close()
+
+
+def _run_training_impl(cfg, dev):
     print(f"\nLoading dataset from: {cfg['dataset_path']}")
-    if cfg['merger_crop_half_width'] is not None:
-        print(f"  Cropping strain to ±{cfg['merger_crop_half_width']} samples around merger "
-              f"(new T = {2 * cfg['merger_crop_half_width']})")
+    active_crop = resolve_crop_for_embedding(cfg)
+    if active_crop is not None:
+        print(f"  Cropping strain to ±{active_crop} samples around merger "
+              f"(new T = {2 * active_crop}; embedding={cfg['embedding_type']})")
+    print(f"  Parameterisation: {cfg['param_parameterization']}")
+    print(f"  Distance prior:   {cfg['distance_prior']}")
     ds = load_dataset_pt(cfg['dataset_path'],
                          use_whitened=cfg['use_whitened'],
-                         merger_crop_half_width=cfg['merger_crop_half_width'])
+                         merger_crop_half_width=active_crop,
+                         param_parameterization=cfg['param_parameterization'])
 
     train_data,   train_params = ds['train_data'],   ds['train_params']
     val_data,     val_params   = ds['val_data'],     ds['val_params']
@@ -280,7 +381,8 @@ def run_training(config=None):
     print("\nModel:")
     print(f"  PARAM_DIM={param_dim}  NUM_DETECTORS={num_detectors}  SEQ_LEN={seq_len}")
     print(f"  CONTEXT_DIM={cfg['context_dim']}  NUM_FLOW_LAYERS={cfg['num_flow_layers']}  "
-          f"HIDDEN_DIM={cfg['hidden_dim']}  EMBEDDING={cfg['embedding_type']}")
+          f"HIDDEN_DIM={cfg['hidden_dim']}  EMBEDDING={cfg['embedding_type']}  "
+          f"COUPLING={cfg['coupling_type']}")
 
     model = DINGOModel(
         num_detectors=num_detectors,
@@ -295,6 +397,9 @@ def run_training(config=None):
         lstm_hidden_dim=cfg['lstm_hidden_dim'],
         lstm_num_layers=cfg['lstm_num_layers'],
         conv1d_num_filters=cfg['conv1d_num_filters'],
+        coupling_type=cfg['coupling_type'],
+        spline_num_bins=cfg['spline_num_bins'],
+        spline_tail_bound=cfg['spline_tail_bound'],
     ).to(dev)
 
     if cfg.get('compile_model') and dev.type == 'cuda':
@@ -343,6 +448,9 @@ def run_training(config=None):
             'lstm_hidden_dim':        cfg['lstm_hidden_dim'],
             'lstm_num_layers':        cfg['lstm_num_layers'],
             'conv1d_num_filters':     list(cfg['conv1d_num_filters']),
+            'coupling_type':          cfg['coupling_type'],
+            'spline_num_bins':        cfg['spline_num_bins'],
+            'spline_tail_bound':      cfg['spline_tail_bound'],
             'num_epochs':             cfg['num_epochs'],
             'batch_size':             cfg['batch_size'],
             'learning_rate':          cfg['learning_rate'],
@@ -350,11 +458,36 @@ def run_training(config=None):
             'num_training_samples':   num_training_samples,
             'add_noise':              add_noise,
             'whiten':                 cfg['use_whitened'],
-            'merger_crop_half_width': cfg['merger_crop_half_width'],
+            'merger_crop_half_width': active_crop,
+            'simple_crop_half_width': cfg['simple_crop_half_width'],
+            'conv1d_crop_half_width': cfg['conv1d_crop_half_width'],
+            'lstm_crop_half_width':   cfg['lstm_crop_half_width'],
+            'param_parameterization': cfg['param_parameterization'],
+            'distance_prior':         cfg['distance_prior'],
+            'use_amp':                bool(cfg.get('use_amp', False)),
             'compile_model':          bool(cfg.get('compile_model', False)),
+            'drop_last_batch':        bool(cfg.get('drop_last_batch', False)),
             'seed':                   cfg['seed'],
         },
     }
+
+    # Volume-prior importance weights for training loss (see CPU version).
+    train_weights = None
+    if cfg['distance_prior'] == 'volume':
+        if ds.get('train_distance') is None:
+            raise ValueError("distance_prior='volume' requires 'distance' "
+                             "in the dataset labels.")
+        d = ds['train_distance']
+        w = d.pow(2)
+        train_weights = (w / w.mean())
+        print(f"  Volume-prior weights: min={train_weights.min():.3f}, "
+              f"max={train_weights.max():.3f}")
+    elif cfg['distance_prior'] not in ('uniform',):
+        raise ValueError(f"Unknown distance_prior: {cfg['distance_prior']!r}")
+
+    # torch.compile forces consistent batch shapes; auto-enable drop_last
+    # in that case so the user doesn't have to remember.
+    drop_last = cfg.get('drop_last_batch', False) or bool(cfg.get('compile_model'))
 
     t0 = time.time()
     (losses, val_losses, best_state, best_log_prob, best_epoch,
@@ -365,6 +498,9 @@ def run_training(config=None):
         lr=cfg['learning_rate'], weight_decay=cfg['weight_decay'],
         val_params=val_params, val_data=val_data,
         val_chunk_size=cfg['val_chunk_size'],
+        train_weights=train_weights,
+        use_amp=cfg.get('use_amp', False),
+        drop_last_batch=drop_last,
         extra_patience_after_scheduler=cfg['extra_patience_after_scheduler'],
         checkpoint_path=save_path,
         checkpoint_extras=checkpoint_extras,

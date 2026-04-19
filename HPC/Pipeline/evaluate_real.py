@@ -33,7 +33,12 @@ import numpy as np
 import torch
 from scipy import stats
 
-from train_model_cpu import DINGOModel, crop_to_merger, load_dataset_pt
+from train_model_cpu import (
+    DINGOModel,
+    crop_to_merger,
+    load_dataset_pt,
+    resolve_crop_for_embedding,
+)
 
 
 DEVICE = torch.device('cpu')
@@ -75,6 +80,12 @@ def build_model_from_checkpoint(ckpt):
         embedding_type=cfg['embedding_type'],
         embedding_dropout=cfg.get('embedding_dropout', 0.1),
         share_detector_weights=cfg.get('share_detector_weights', True),
+        lstm_hidden_dim=cfg.get('lstm_hidden_dim', 128),
+        lstm_num_layers=cfg.get('lstm_num_layers', 2),
+        conv1d_num_filters=tuple(cfg.get('conv1d_num_filters', (64, 128, 256))),
+        coupling_type=cfg.get('coupling_type', 'affine'),
+        spline_num_bins=cfg.get('spline_num_bins', 8),
+        spline_tail_bound=cfg.get('spline_tail_bound', 3.0),
     ).to(DEVICE)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
@@ -99,6 +110,8 @@ def format_label(name):
     return {
         'mass1': r'$m_1\ [M_\odot]$',
         'mass2': r'$m_2\ [M_\odot]$',
+        'chirp_mass': r'$\mathcal{M}\ [M_\odot]$',
+        'mass_ratio': r'$q$',
         'spin1z': r'$\chi_{1z}$',
         'spin2z': r'$\chi_{2z}$',
         'distance': r'$d_L\ [\mathrm{Mpc}]$',
@@ -174,8 +187,8 @@ def plot_corner_real(samples_phys, truth_partial, param_names, title, outpath):
     print(f"  saved {outpath}")
 
 
-def plot_residuals(matched, outpath):
-    params = ['mass1', 'mass2', 'distance', 'ra', 'dec']
+def plot_residuals(matched, outpath, params=('mass1', 'mass2', 'distance', 'ra', 'dec')):
+    params = list(params)
     fig, axes = plt.subplots(1, len(params), figsize=(3.8 * len(params), 3.8))
     for ax, p in zip(axes, params):
         truth = np.array([m['truth'][p] for m in matched if p in m['truth']])
@@ -201,8 +214,8 @@ def plot_residuals(matched, outpath):
     print(f"  saved {outpath}")
 
 
-def plot_zscores_real(matched, outpath):
-    params = ['mass1', 'mass2', 'distance', 'ra', 'dec']
+def plot_zscores_real(matched, outpath, params=('mass1', 'mass2', 'distance', 'ra', 'dec')):
+    params = list(params)
     fig, axes = plt.subplots(1, len(params), figsize=(3.4 * len(params), 3.4),
                              sharey=True)
     x = np.linspace(-5, 5, 200)
@@ -291,13 +304,17 @@ def main():
     print(f"  best log-prob @ ep{ckpt.get('best_epoch')}: {ckpt.get('best_log_prob'):.4f}")
 
     # --- synthetic dataset (for param_norm_info) ---
-    crop_hw = ckpt['config'].get('merger_crop_half_width')
+    crop_hw = resolve_crop_for_embedding(ckpt['config'])
     if crop_hw is not None:
         print(f"Applying merger crop ±{crop_hw} samples (from checkpoint config)")
+    param_param = ckpt['config'].get('param_parameterization', 'm1_m2')
+    if param_param != 'm1_m2':
+        print(f"Parameterization: {param_param}")
     syn = load_dataset_pt(
         SYN_DATASET,
         use_whitened=ckpt['config'].get('whiten', True),
         merger_crop_half_width=crop_hw,
+        param_parameterization=param_param,
     )
     param_names = syn['param_names']
     param_norm_info = syn['param_norm_info']
@@ -313,11 +330,22 @@ def main():
 
     # --- catalogue ---
     catalogue = load_catalogue(CSV_PATH)
-    csv_to_model = {
-        'ra': 'ra', 'dec': 'dec',
-        'mass_1_source': 'mass1', 'mass_2_source': 'mass2',
-        'luminosity_distance': 'distance',
-    }
+    # Mc/q-trained models see chirp_mass + mass_ratio instead of mass1 + mass2.
+    # The CSV only has source-frame component masses, so derive Mc and q per row.
+    if param_param == 'Mc_q':
+        csv_to_model = {
+            'ra': 'ra', 'dec': 'dec',
+            'luminosity_distance': 'distance',
+        }
+        mass_params = ['chirp_mass', 'mass_ratio']
+    else:
+        csv_to_model = {
+            'ra': 'ra', 'dec': 'dec',
+            'mass_1_source': 'mass1', 'mass_2_source': 'mass2',
+            'luminosity_distance': 'distance',
+        }
+        mass_params = ['mass1', 'mass2']
+    matched_params = mass_params + ['distance', 'ra', 'dec']
 
     # --- posterior sampling per event ---
     print(f"\nSampling {NUM_SAMPLES} posteriors per event on {N_real} real events …")
@@ -331,9 +359,6 @@ def main():
     # (partial truth) — matching GWTC on the 5 constrained params is the useful bit.
     logprobs_real = np.zeros(N_real)
     matched = []
-    cat_source_lookup = {
-        csv_to_model[k]: k for k in csv_to_model
-    }  # model_name → csv_column
     for i, ev in enumerate(event_names):
         cat_name = strip_version(ev)
         cat_row = catalogue.get(cat_name)
@@ -345,6 +370,16 @@ def main():
                 j = param_names.index(model_param)
                 pseudo[j] = v
                 truth[model_param] = v
+            if param_param == 'Mc_q':
+                m1_cat = cat_row['mass_1_source']
+                m2_cat = cat_row['mass_2_source']
+                m_big, m_small = max(m1_cat, m2_cat), min(m1_cat, m2_cat)
+                q_cat = m_small / m_big
+                mc_cat = (m1_cat * m2_cat) ** 0.6 / (m1_cat + m2_cat) ** 0.2
+                for name, v in (('chirp_mass', mc_cat), ('mass_ratio', q_cat)):
+                    j = param_names.index(name)
+                    pseudo[j] = v
+                    truth[name] = v
         z = normalize(pseudo, param_names, param_norm_info)
         z_t = torch.as_tensor(z[None, :], dtype=torch.float32)
         with torch.inference_mode():
@@ -383,14 +418,19 @@ def main():
         i = name_to_i[hit]
         cat = catalogue.get(strip_version(hit), {})
         truth_partial = {csv_to_model[k]: v for k, v in cat.items() if k in csv_to_model}
+        if param_param == 'Mc_q' and 'mass_1_source' in cat and 'mass_2_source' in cat:
+            m1_cat, m2_cat = cat['mass_1_source'], cat['mass_2_source']
+            m_big, m_small = max(m1_cat, m2_cat), min(m1_cat, m2_cat)
+            truth_partial['chirp_mass'] = (m1_cat * m2_cat) ** 0.6 / (m1_cat + m2_cat) ** 0.2
+            truth_partial['mass_ratio'] = m_small / m_big
         plot_corner_real(
             samples_phys[i], truth_partial, param_names,
             title=f'{hit}  (log-prob {logprobs_real[i]:.2f})',
             outpath=PLOT_DIR / f'corner_real_{hit}.png',
         )
 
-    plot_residuals(matched, PLOT_DIR / 'real_residuals.png')
-    plot_zscores_real(matched, PLOT_DIR / 'real_zscores.png')
+    plot_residuals(matched, PLOT_DIR / 'real_residuals.png', params=matched_params)
+    plot_zscores_real(matched, PLOT_DIR / 'real_zscores.png', params=matched_params)
     plot_widths(samples_phys, param_names, PLOT_DIR / 'real_widths.png')
     plot_logprob_distribution(logprobs_real, syn_lp, PLOT_DIR / 'real_logprob.png')
 
@@ -406,7 +446,7 @@ def main():
         "Per-parameter residuals (catalogue − posterior mean) and z-scores:",
         f"{'param':<10}  {'N':>4}  {'median Δ':>12}  {'median σ_post':>14}  {'median |z|':>11}  {'cov@68%':>8}  {'cov@95%':>8}",
     ]
-    for p in ['mass1', 'mass2', 'distance', 'ra', 'dec']:
+    for p in matched_params:
         d = np.array([m['truth'][p] - m['post_mean'][p] for m in matched if p in m['truth']])
         sig = np.array([m['post_std'][p] for m in matched if p in m['truth']])
         z = d / np.where(sig > 0, sig, 1.0)

@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from scipy import stats
 
-from train_model_cpu import DINGOModel, load_dataset_pt
+from train_model_cpu import DINGOModel, load_dataset_pt, resolve_crop_for_embedding
 
 
 DEVICE = torch.device('cpu')
@@ -43,6 +43,12 @@ def build_model_from_checkpoint(ckpt):
         embedding_type=cfg['embedding_type'],
         embedding_dropout=cfg.get('embedding_dropout', 0.1),
         share_detector_weights=cfg.get('share_detector_weights', True),
+        lstm_hidden_dim=cfg.get('lstm_hidden_dim', 128),
+        lstm_num_layers=cfg.get('lstm_num_layers', 2),
+        conv1d_num_filters=tuple(cfg.get('conv1d_num_filters', (64, 128, 256))),
+        coupling_type=cfg.get('coupling_type', 'affine'),
+        spline_num_bins=cfg.get('spline_num_bins', 8),
+        spline_tail_bound=cfg.get('spline_tail_bound', 3.0),
     ).to(DEVICE)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
@@ -61,6 +67,8 @@ def format_label(name):
     return {
         'mass1': r'$m_1\ [M_\odot]$',
         'mass2': r'$m_2\ [M_\odot]$',
+        'chirp_mass': r'$\mathcal{M}\ [M_\odot]$',
+        'mass_ratio': r'$q$',
         'spin1z': r'$\chi_{1z}$',
         'spin2z': r'$\chi_{2z}$',
         'distance': r'$d_L\ [\mathrm{Mpc}]$',
@@ -332,13 +340,17 @@ if __name__ == '__main__':
     print(f"  Params: {sum(p.numel() for p in model.parameters()):,}")
 
     print(f"\nLoading dataset: {DATASET_PATH}  ({EVAL_SPLIT} split)")
-    crop_hw = ckpt['config'].get('merger_crop_half_width')
+    crop_hw = resolve_crop_for_embedding(ckpt['config'])
     if crop_hw is not None:
         print(f"  Applying merger crop ±{crop_hw} samples (from checkpoint config)")
+    param_param = ckpt['config'].get('param_parameterization', 'm1_m2')
+    if param_param != 'm1_m2':
+        print(f"  Parameterization: {param_param}")
     ds = load_dataset_pt(
         DATASET_PATH,
         use_whitened=ckpt['config'].get('whiten', True),
         merger_crop_half_width=crop_hw,
+        param_parameterization=param_param,
     )
     eval_data = ds[f'{EVAL_SPLIT}_data']
     eval_params_z = ds[f'{EVAL_SPLIT}_params']

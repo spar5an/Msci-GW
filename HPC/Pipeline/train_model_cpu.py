@@ -12,6 +12,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 print(f"PyTorch version: {torch.__version__}")
 
@@ -87,18 +88,194 @@ class AffineCouplingLayer(nn.Module):
         return y, log_det
 
 
+def _searchsorted(bin_locations, inputs):
+    """Return i s.t. bin_locations[..., i] <= inputs < bin_locations[..., i+1]."""
+    return torch.sum(inputs[..., None] >= bin_locations, dim=-1) - 1
+
+
+def _rational_quadratic_spline(inputs, unnormalized_widths, unnormalized_heights,
+                               unnormalized_derivatives, inverse=False,
+                               tail_bound=3.0, min_bin_width=1e-3,
+                               min_bin_height=1e-3, min_derivative=1e-3):
+    """Monotonic rational-quadratic spline with linear tails (Durkan 2019).
+
+    Inputs have shape (..., D). The three unnormalized_* tensors have shape
+    (..., D, num_bins) (widths, heights) and (..., D, num_bins - 1)
+    (interior derivatives). Outside [-tail_bound, tail_bound] the map is the
+    identity (log_det contribution = 0), so the flow still covers the real
+    line. Returns (outputs, log_det) with log_det shape (..., D).
+    """
+    num_bins = unnormalized_widths.shape[-1]
+    inside = (inputs >= -tail_bound) & (inputs <= tail_bound)
+    outside = ~inside
+
+    outputs = torch.zeros_like(inputs)
+    logabsdet = torch.zeros_like(inputs)
+
+    # Tail: identity. Matches Durkan's "linear" tail default with derivative 1.
+    outputs[outside] = inputs[outside]
+    logabsdet[outside] = 0.0
+
+    if inside.any():
+        inp_in = inputs[inside]
+        uw = unnormalized_widths[inside]
+        uh = unnormalized_heights[inside]
+        ud = unnormalized_derivatives[inside]
+
+        # Normalise widths / heights to sum to 2*tail_bound, then soften floor.
+        widths  = torch.softmax(uw, dim=-1)
+        widths  = min_bin_width + (1 - min_bin_width * num_bins) * widths
+        heights = torch.softmax(uh, dim=-1)
+        heights = min_bin_height + (1 - min_bin_height * num_bins) * heights
+
+        cumwidths  = torch.cumsum(widths,  dim=-1)
+        cumheights = torch.cumsum(heights, dim=-1)
+        cumwidths  = F.pad(cumwidths,  pad=(1, 0), mode='constant', value=0.0)
+        cumheights = F.pad(cumheights, pad=(1, 0), mode='constant', value=0.0)
+        cumwidths  = cumwidths  * (2 * tail_bound) - tail_bound
+        cumheights = cumheights * (2 * tail_bound) - tail_bound
+        cumwidths[...,  0] = -tail_bound; cumwidths[...,  -1] = tail_bound
+        cumheights[..., 0] = -tail_bound; cumheights[..., -1] = tail_bound
+        widths  = cumwidths[...,  1:] - cumwidths[...,  :-1]
+        heights = cumheights[..., 1:] - cumheights[..., :-1]
+
+        derivatives = min_derivative + F.softplus(ud)
+        # Boundary derivatives = 1 → linear tail matches smoothly.
+        derivatives = F.pad(derivatives, pad=(1, 1), value=1.0)
+
+        locations = cumheights if inverse else cumwidths
+        bin_idx = _searchsorted(locations, inp_in).clamp(0, num_bins - 1)[..., None]
+        input_cumwidths  = cumwidths.gather(-1, bin_idx)[..., 0]
+        input_bin_widths = widths.gather(-1, bin_idx)[..., 0]
+        input_cumheights = cumheights.gather(-1, bin_idx)[..., 0]
+        input_heights    = heights.gather(-1, bin_idx)[..., 0]
+        delta = input_heights / input_bin_widths
+        input_deriv      = derivatives.gather(-1, bin_idx)[..., 0]
+        input_deriv_plus = derivatives.gather(-1, bin_idx + 1)[..., 0]
+
+        if inverse:
+            a = (inp_in - input_cumheights) * (input_deriv + input_deriv_plus - 2 * delta) \
+                + input_heights * (delta - input_deriv)
+            b = input_heights * input_deriv \
+                - (inp_in - input_cumheights) * (input_deriv + input_deriv_plus - 2 * delta)
+            c = -delta * (inp_in - input_cumheights)
+            disc = b.pow(2) - 4 * a * c
+            disc = disc.clamp(min=0.0)
+            xi = (2 * c) / (-b - torch.sqrt(disc))
+            out = xi * input_bin_widths + input_cumwidths
+            theta_one_minus_theta = xi * (1 - xi)
+            denom = delta + (input_deriv + input_deriv_plus - 2 * delta) * theta_one_minus_theta
+            deriv_numer = delta.pow(2) * (
+                input_deriv_plus * xi.pow(2) + 2 * delta * theta_one_minus_theta
+                + input_deriv * (1 - xi).pow(2)
+            )
+            logdet = -(torch.log(deriv_numer) - 2 * torch.log(denom))
+        else:
+            xi = (inp_in - input_cumwidths) / input_bin_widths
+            theta_one_minus_theta = xi * (1 - xi)
+            numer = input_heights * (delta * xi.pow(2) + input_deriv * theta_one_minus_theta)
+            denom = delta + (input_deriv + input_deriv_plus - 2 * delta) * theta_one_minus_theta
+            out = input_cumheights + numer / denom
+            deriv_numer = delta.pow(2) * (
+                input_deriv_plus * xi.pow(2) + 2 * delta * theta_one_minus_theta
+                + input_deriv * (1 - xi).pow(2)
+            )
+            logdet = torch.log(deriv_numer) - 2 * torch.log(denom)
+
+        outputs[inside] = out
+        logabsdet[inside] = logdet
+
+    return outputs, logabsdet
+
+
+class RQSplineCouplingLayer(nn.Module):
+    """Rational-quadratic neural spline coupling (Durkan et al. 2019).
+
+    Same half-masking convention as `AffineCouplingLayer`. For each "free"
+    dim we predict num_bins widths, num_bins heights and num_bins-1 interior
+    derivatives from an MLP conditioned on the masked dims + context.
+    Outside [-tail_bound, tail_bound] the map is the identity so the flow
+    retains full support on R^D.
+    """
+    def __init__(self, dim, context_dim, hidden_dim=128, num_bins=8,
+                 tail_bound=3.0, mask_type='half'):
+        super().__init__()
+        self.dim = dim
+        self.num_bins = num_bins
+        self.tail_bound = tail_bound
+
+        self.register_buffer('mask', torch.zeros(dim))
+        if mask_type in ['half', 'even']:
+            self.mask[::2] = 1
+        elif mask_type == 'odd':
+            self.mask[1::2] = 1
+
+        out_per_dim = 3 * num_bins - 1
+        self.net = nn.Sequential(
+            nn.Linear(dim + context_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, dim * out_per_dim),
+        )
+        # Zero-init the final layer so the flow starts near identity.
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x, context, reverse=False):
+        B = x.shape[0]
+        masked = x * self.mask
+        params = self.net(torch.cat([masked, context], dim=1))
+        params = params.view(B, self.dim, 3 * self.num_bins - 1)
+        uw = params[..., :self.num_bins]
+        uh = params[..., self.num_bins:2 * self.num_bins]
+        ud = params[..., 2 * self.num_bins:]
+
+        y_free, logdet_free = _rational_quadratic_spline(
+            x, uw, uh, ud, inverse=reverse, tail_bound=self.tail_bound,
+        )
+        # Free dims are those where mask == 0. Masked dims pass through.
+        free = (1 - self.mask).bool()
+        y = torch.where(free, y_free, x)
+        log_det = (logdet_free * (1 - self.mask)).sum(dim=1)
+        if reverse:
+            # For inverse pass, log_det returned by caller is not used in our
+            # `forward`-only likelihood, but keep sign consistent for symmetry.
+            pass
+        return y, log_det
+
+
+def _make_coupling(coupling_type, dim, context_dim, hidden_dim, mask_type,
+                   num_bins=8, tail_bound=3.0):
+    if coupling_type == 'affine':
+        return AffineCouplingLayer(dim=dim, context_dim=context_dim,
+                                   hidden_dim=hidden_dim, mask_type=mask_type)
+    if coupling_type == 'spline':
+        return RQSplineCouplingLayer(dim=dim, context_dim=context_dim,
+                                     hidden_dim=hidden_dim, num_bins=num_bins,
+                                     tail_bound=tail_bound, mask_type=mask_type)
+    raise ValueError(f"Unknown coupling_type: {coupling_type}")
+
+
 class NormalizingFlow(nn.Module):
-    def __init__(self, param_dim=1, context_dim=64, num_layers=6, hidden_dim=128):
+    def __init__(self, param_dim=1, context_dim=64, num_layers=6, hidden_dim=128,
+                 coupling_type='affine', spline_num_bins=8, spline_tail_bound=3.0):
         super().__init__()
         self.param_dim = param_dim
         self.context_dim = context_dim
+        self.coupling_type = coupling_type
 
         self.layers = nn.ModuleList([
-            AffineCouplingLayer(
+            _make_coupling(
+                coupling_type=coupling_type,
                 dim=param_dim,
                 context_dim=context_dim,
                 hidden_dim=hidden_dim,
-                mask_type='even' if i % 2 == 0 else 'odd'
+                mask_type='even' if i % 2 == 0 else 'odd',
+                num_bins=spline_num_bins,
+                tail_bound=spline_tail_bound,
             )
             for i in range(num_layers)
         ])
@@ -316,7 +493,9 @@ class DINGOModel(nn.Module):
                  num_flow_layers=6, hidden_dim=128, embedding_type='simple',
                  embedding_dropout=0.1, share_detector_weights=True,
                  lstm_hidden_dim=128, lstm_num_layers=2,
-                 conv1d_num_filters=(64, 128, 256)):
+                 conv1d_num_filters=(64, 128, 256),
+                 coupling_type='affine', spline_num_bins=8,
+                 spline_tail_bound=3.0):
         super().__init__()
 
         self.embedding_type = embedding_type
@@ -347,7 +526,10 @@ class DINGOModel(nn.Module):
             param_dim=param_dim,
             context_dim=context_dim,
             num_layers=num_flow_layers,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
+            coupling_type=coupling_type,
+            spline_num_bins=spline_num_bins,
+            spline_tail_bound=spline_tail_bound,
         )
 
     def forward(self, params, data):
@@ -386,13 +568,51 @@ def crop_to_merger(data, half_width):
     return data[..., lo:hi].contiguous()
 
 
-def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None):
+def _m1m2_to_mcq(m1, m2):
+    """Return (chirp_mass, mass_ratio q = m_small / m_large in (0, 1])."""
+    m_big, m_small = torch.maximum(m1, m2), torch.minimum(m1, m2)
+    q = m_small / m_big
+    mc = (m1 * m2).pow(0.6) / (m1 + m2).pow(0.2)
+    return mc, q
+
+
+def _mcq_to_m1m2(mc, q):
+    """Inverse of _m1m2_to_mcq. Returns (m1, m2) with m1 >= m2."""
+    eta = q / (1.0 + q).pow(2)
+    M = mc / eta.pow(0.6)
+    m1 = M / (1.0 + q)
+    m2 = M * q / (1.0 + q)
+    return m1, m2
+
+
+def resolve_crop_for_embedding(cfg):
+    """Select the crop half-width to apply given the active embedding.
+
+    Per-embedding overrides (conv1d_crop_half_width, simple_crop_half_width,
+    lstm_crop_half_width) take precedence over the base merger_crop_half_width
+    if set (non-None). Makes it natural to HP-scan window size per embedding
+    in `hp_search.py` — e.g. conv1d / simple can use a tight 100-sample crop
+    while lstm keeps the full 500.
+    """
+    base = cfg.get('merger_crop_half_width')
+    key = f"{cfg.get('embedding_type')}_crop_half_width"
+    override = cfg.get(key)
+    return override if override is not None else base
+
+
+def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None,
+                    param_parameterization='m1_m2'):
     """Load dataset.pt from generate_dataset.py, split it, and z-score the params.
 
     Keeps the detector channel axis: data tensors have shape (N, num_detectors, T).
     If `merger_crop_half_width` is an int, strain is centre-cropped to
     ±half_width samples around the merger (which the data-gen pipeline
     places at T//2), giving a new time axis of 2*half_width.
+
+    When ``param_parameterization='Mc_q'``, the ``mass1`` and ``mass2`` columns
+    are replaced with ``chirp_mass`` and ``mass_ratio`` (q = m_small/m_large).
+    Training, val, and test splits all share the same transform; the flow
+    learns posteriors directly in (Mc, q) space.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -421,6 +641,30 @@ def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None):
     y = raw['y'].float()        # (N, P)
     metadata = raw['metadata']
     param_names = list(metadata['parameter_names'])
+
+    # Keep a copy of the raw distance column for optional importance-weighting
+    # under a volume-uniform prior. Done here so run_training can pull it
+    # without re-loading the dataset.
+    distance_col_idx = param_names.index('distance') if 'distance' in param_names else None
+    raw_distance = y[:, distance_col_idx].clone() if distance_col_idx is not None else None
+
+    # Reparameterise masses if requested. Affects label dim layout and the
+    # param_names list; everything downstream (z-score, flow training,
+    # evaluators) reads param_names so the swap is transparent.
+    if param_parameterization == 'Mc_q':
+        try:
+            i1 = param_names.index('mass1')
+            i2 = param_names.index('mass2')
+        except ValueError as exc:
+            raise ValueError("param_parameterization='Mc_q' requires "
+                             "'mass1' and 'mass2' in the dataset labels.") from exc
+        mc, q = _m1m2_to_mcq(y[:, i1], y[:, i2])
+        y[:, i1] = mc
+        y[:, i2] = q
+        param_names[i1] = 'chirp_mass'
+        param_names[i2] = 'mass_ratio'
+    elif param_parameterization not in ('m1_m2',):
+        raise ValueError(f"Unknown param_parameterization: {param_parameterization!r}")
 
     train_idx = torch.as_tensor(raw['train_indices'], dtype=torch.long)
     val_idx   = torch.as_tensor(raw['val_indices'],   dtype=torch.long)
@@ -454,6 +698,12 @@ def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None):
         for j, name in enumerate(param_names)
     }
 
+    # Split the raw distance vector the same way so run_training can build
+    # per-split importance weights without re-loading.
+    train_distance = raw_distance[train_idx] if raw_distance is not None else None
+    val_distance   = raw_distance[val_idx]   if raw_distance is not None else None
+    test_distance  = raw_distance[test_idx]  if raw_distance is not None else None
+
     return {
         'train_data':   train_X, 'train_params': train_y,
         'val_data':     val_X,   'val_params':   val_y,
@@ -461,6 +711,10 @@ def load_dataset_pt(path, use_whitened=True, merger_crop_half_width=None):
         'param_norm_info': param_norm_info,
         'param_names': param_names,
         'metadata':    metadata,
+        'train_distance': train_distance,
+        'val_distance':   val_distance,
+        'test_distance':  test_distance,
+        'param_parameterization': param_parameterization,
     }
 
 
@@ -472,6 +726,7 @@ def train_dingo_model(model, train_params, train_data,
                       num_epochs=20, batch_size=32, lr=1e-4,
                       weight_decay=1e-4,
                       val_params=None, val_data=None,
+                      train_weights=None,
                       extra_patience_after_scheduler=3,
                       checkpoint_path=None,
                       checkpoint_extras=None,
@@ -566,7 +821,11 @@ def train_dingo_model(model, train_params, train_data,
             optimizer.zero_grad()
 
             log_prob = model(batch_params, batch_data)
-            loss = -log_prob.mean()
+            if train_weights is not None:
+                w = train_weights[batch_indices]
+                loss = -(w * log_prob).mean()
+            else:
+                loss = -log_prob.mean()
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"  NaN/Inf loss at epoch {epoch+1}, batch {i//batch_size + 1} — skipped")
@@ -656,6 +915,20 @@ DEFAULT_CONFIG = {
     'use_whitened':             True,
     # ±N samples around the merger (index T//2); None keeps full window.
     'merger_crop_half_width':   500,
+    # Per-embedding crop overrides. If set (not None), they replace
+    # merger_crop_half_width for the matching embedding. Lets hp_search
+    # sweep window size per-embedding (e.g. tight window for conv1d/simple,
+    # longer for lstm).
+    'simple_crop_half_width':   None,
+    'conv1d_crop_half_width':   None,
+    'lstm_crop_half_width':     None,
+    # Parameter space. 'm1_m2' (default) trains on the 13 raw labels;
+    # 'Mc_q' replaces mass1/mass2 with chirp_mass and mass_ratio.
+    'param_parameterization':   'm1_m2',
+    # 'uniform' (default) → no reweighting; 'volume' → importance-weight
+    # each sample by d^2 (normalised) to emulate training under a
+    # uniform-in-comoving-volume distance prior with the existing dataset.
+    'distance_prior':           'uniform',
 
     # Model — top-level knobs the HP search is expected to vary
     'embedding_type':           'lstm',      # 'simple' | 'conv1d' | 'lstm'
@@ -668,6 +941,12 @@ DEFAULT_CONFIG = {
     'lstm_hidden_dim':          128,
     'lstm_num_layers':          2,
     'conv1d_num_filters':       (64, 128, 256),
+    # Flow coupling. 'affine' = simple scale+shift (faster, less expressive).
+    # 'spline' = rational-quadratic neural spline flow (Durkan 2019; much
+    # more expressive — 10x parameter-for-parameter for tight posteriors).
+    'coupling_type':            'affine',
+    'spline_num_bins':          8,
+    'spline_tail_bound':        3.0,
 
     # Training
     'num_epochs':                   20,
@@ -694,20 +973,29 @@ def _seed_everything(seed):
 
 
 def build_checkpoint_path(cfg, num_training_samples, add_noise):
-    """Compute the canonical save path from a config dict."""
+    """Compute the canonical save path from a config dict.
+
+    Uses the embedding-resolved crop so per-embedding overrides are visible
+    in the filename (e.g. conv1d with simple_crop_half_width=100 writes
+    `...conv1d_crop100...`, not the base `crop500`).
+    """
     samples_str = (f"{num_training_samples // 1000}k"
                    if num_training_samples >= 1000 else str(num_training_samples))
     if cfg['use_whitened']:
         signal_tag = 'whitened'
     else:
         signal_tag = 'noisy' if add_noise else 'clean'
-    crop_tag = (f"_crop{cfg['merger_crop_half_width']}"
-                if cfg['merger_crop_half_width'] is not None else '')
+    active_crop = resolve_crop_for_embedding(cfg)
+    crop_tag = f"_crop{active_crop}" if active_crop is not None else ''
+    coupling = cfg.get('coupling_type', 'affine')
+    coupling_tag = f"_{coupling}" if coupling != 'affine' else ''
+    param_tag = ('_Mcq' if cfg.get('param_parameterization') == 'Mc_q' else '')
+    prior_tag = ('_volprior' if cfg.get('distance_prior') == 'volume' else '')
     tag = f"_{cfg['checkpoint_tag']}" if cfg['checkpoint_tag'] else ''
     device_tag = f"_{cfg['device_tag']}" if cfg['device_tag'] else ''
     fname = (f"dingo_N{samples_str}_F{cfg['num_flow_layers']}_C{cfg['context_dim']}"
              f"_H{cfg['hidden_dim']}_E{cfg['num_epochs']}_{cfg['embedding_type']}"
-             f"{crop_tag}_{signal_tag}{tag}{device_tag}.pt")
+             f"{coupling_tag}{crop_tag}{param_tag}{prior_tag}_{signal_tag}{tag}{device_tag}.pt")
     return os.path.join(cfg['checkpoint_dir'], fname)
 
 
@@ -739,12 +1027,16 @@ def run_training(config=None, *, device=None, seed_fn=None):
 
     # ----- Load data -----
     print(f"\nLoading dataset from: {cfg['dataset_path']}")
-    if cfg['merger_crop_half_width'] is not None:
-        print(f"  Cropping strain to ±{cfg['merger_crop_half_width']} samples around merger "
-              f"(new T = {2 * cfg['merger_crop_half_width']})")
+    active_crop = resolve_crop_for_embedding(cfg)
+    if active_crop is not None:
+        print(f"  Cropping strain to ±{active_crop} samples around merger "
+              f"(new T = {2 * active_crop}; embedding={cfg['embedding_type']})")
+    print(f"  Parameterisation: {cfg['param_parameterization']}")
+    print(f"  Distance prior:   {cfg['distance_prior']}")
     ds = load_dataset_pt(cfg['dataset_path'],
                          use_whitened=cfg['use_whitened'],
-                         merger_crop_half_width=cfg['merger_crop_half_width'])
+                         merger_crop_half_width=active_crop,
+                         param_parameterization=cfg['param_parameterization'])
 
     train_data,   train_params = ds['train_data'],   ds['train_params']
     val_data,     val_params   = ds['val_data'],     ds['val_params']
@@ -788,6 +1080,9 @@ def run_training(config=None, *, device=None, seed_fn=None):
         lstm_hidden_dim=cfg['lstm_hidden_dim'],
         lstm_num_layers=cfg['lstm_num_layers'],
         conv1d_num_filters=cfg['conv1d_num_filters'],
+        coupling_type=cfg['coupling_type'],
+        spline_num_bins=cfg['spline_num_bins'],
+        spline_tail_bound=cfg['spline_tail_bound'],
     ).to(dev)
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -832,6 +1127,9 @@ def run_training(config=None, *, device=None, seed_fn=None):
             'lstm_hidden_dim':        cfg['lstm_hidden_dim'],
             'lstm_num_layers':        cfg['lstm_num_layers'],
             'conv1d_num_filters':     list(cfg['conv1d_num_filters']),
+            'coupling_type':          cfg['coupling_type'],
+            'spline_num_bins':        cfg['spline_num_bins'],
+            'spline_tail_bound':      cfg['spline_tail_bound'],
             'num_epochs':             cfg['num_epochs'],
             'batch_size':             cfg['batch_size'],
             'learning_rate':          cfg['learning_rate'],
@@ -839,10 +1137,33 @@ def run_training(config=None, *, device=None, seed_fn=None):
             'num_training_samples':   num_training_samples,
             'add_noise':              add_noise,
             'whiten':                 cfg['use_whitened'],
-            'merger_crop_half_width': cfg['merger_crop_half_width'],
+            'merger_crop_half_width': active_crop,
+            'simple_crop_half_width': cfg['simple_crop_half_width'],
+            'conv1d_crop_half_width': cfg['conv1d_crop_half_width'],
+            'lstm_crop_half_width':   cfg['lstm_crop_half_width'],
+            'param_parameterization': cfg['param_parameterization'],
+            'distance_prior':         cfg['distance_prior'],
             'seed':                   cfg['seed'],
         },
     }
+
+    # ----- Distance importance weights for a volume-uniform prior -----
+    # Dataset samples distance uniformly in [D_min, D_max]; the BBH prior
+    # is uniform-in-comoving-volume ∝ D^2. Reweight loss by normalised D^2
+    # so the flow learns posteriors under the physical prior without
+    # regenerating the dataset.
+    train_weights = None
+    if cfg['distance_prior'] == 'volume':
+        if ds.get('train_distance') is None:
+            raise ValueError("distance_prior='volume' requires 'distance' "
+                             "in the dataset labels.")
+        d = ds['train_distance'].to(dev)
+        w = d.pow(2)
+        train_weights = w / w.mean()  # normalise so mean weight = 1
+        print(f"  Volume-prior weights: min={train_weights.min():.3f}, "
+              f"max={train_weights.max():.3f}")
+    elif cfg['distance_prior'] not in ('uniform',):
+        raise ValueError(f"Unknown distance_prior: {cfg['distance_prior']!r}")
 
     # ----- Train -----
     t0 = time.time()
@@ -852,6 +1173,7 @@ def run_training(config=None, *, device=None, seed_fn=None):
         num_epochs=cfg['num_epochs'], batch_size=cfg['batch_size'],
         lr=cfg['learning_rate'], weight_decay=cfg['weight_decay'],
         val_params=val_params, val_data=val_data,
+        train_weights=train_weights,
         extra_patience_after_scheduler=cfg['extra_patience_after_scheduler'],
         checkpoint_path=save_path,
         checkpoint_extras=checkpoint_extras,
