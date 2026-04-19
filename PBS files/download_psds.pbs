@@ -1,11 +1,17 @@
 #!/bin/bash
 #PBS -N download_psds
-#PBS -l walltime=06:00:00
+#PBS -l walltime=04:00:00
 #PBS -l select=1:ncpus=2:mem=8gb
 #PBS -j oe
 #PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
 
 # 1) Clean module environment
+# Redirect stdout/stderr to a live log in hpc_outputs/ we can tail from the
+# login node while the job is still running. PBS's final .OU is still
+# written at job end as normal.
+LIVE_LOG="/rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/live_${PBS_JOBID%%.*}.log"
+exec > >(tee "$LIVE_LOG") 2>&1
+
 module purge
 module load tools/prod
 module load Python/3.11.3-GCCcore-12.3.0

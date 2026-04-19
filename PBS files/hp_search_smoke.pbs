@@ -1,0 +1,83 @@
+#!/bin/bash
+#PBS -N hp_smoke
+#PBS -l walltime=02:00:00
+#PBS -l select=1:ncpus=4:mem=64gb:ngpus=1:gpu_type=L40S
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# Smoke test: dry-run the grid, then run the first 2 combinations end-to-end.
+# Goal: confirm the 200k dataset loads on a GPU node, the hp_search pipeline
+# wires through to train_model_gpu, and a checkpoint gets written — before
+# committing a 24h full-sweep slot.
+
+# Redirect stdout/stderr to a live log in hpc_outputs/ we can tail from the
+# login node while the job is still running. PBS's final .OU is still
+# written at job end as normal.
+LIVE_LOG="/rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/live_${PBS_JOBID%%.*}.log"
+exec > >(tee "$LIVE_LOG") 2>&1
+
+module purge
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+REPO_ROOT="/rds/general/user/jc5322/home/Project/Msci-GW"
+PIPELINE_DIR="$REPO_ROOT/HPC/Pipeline"
+CKPT_DIR="$PIPELINE_DIR/checkpoints/hp_smoke"
+RESULTS_CSV="$PIPELINE_DIR/hp_search_smoke_results.csv"
+
+mkdir -p "$CKPT_DIR"
+cd "$PIPELINE_DIR"
+
+echo "=== DEBUG INFO ==="
+echo "hostname:     $(hostname)"
+echo "pwd:          $(pwd)"
+echo "which python: $(which python)"
+python -V
+python -c "import torch; print('torch', torch.__version__, '| cuda:', torch.cuda.is_available(), '| dev:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
+
+echo
+echo "=== nvidia-smi ==="
+nvidia-smi || echo "nvidia-smi not available"
+
+echo
+echo "=== Pre-flight: import trainer + verify dataset ==="
+python - <<'PY'
+import os
+from train_model_gpu import run_training, GPU_DEFAULT_CONFIG
+path = os.path.join('Data', 'gr_200k_o4.pt')
+if not os.path.isfile(path):
+    raise SystemExit(f"Dataset missing: {path}")
+size_gb = os.path.getsize(path) / 1e9
+print(f"Dataset OK: {path}  ({size_gb:.2f} GB)")
+print("GPU_DEFAULT_CONFIG keys:", sorted(GPU_DEFAULT_CONFIG.keys()))
+PY
+if [ $? -ne 0 ]; then
+    echo "ERROR: pre-flight failed"
+    exit 1
+fi
+
+echo
+echo "=== Dry-run: print the planned grid ==="
+python hp_search.py --device gpu --dry-run --tag smoke
+
+echo
+echo "=== Run first 2 combinations on GPU ==="
+python hp_search.py \
+    --device gpu \
+    --max-runs 2 \
+    --tag smoke \
+    --results-csv "$RESULTS_CSV"
+EXIT_CODE=$?
+
+echo
+echo "=== Summary CSV: $RESULTS_CSV ==="
+if [ -f "$RESULTS_CSV" ]; then
+    cat "$RESULTS_CSV"
+else
+    echo "(no CSV written)"
+fi
+
+echo
+echo "=== Done (exit $EXIT_CODE) ==="
+exit $EXIT_CODE

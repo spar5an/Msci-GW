@@ -7,6 +7,12 @@
 
 
 # 1) Clean module environment
+# Redirect stdout/stderr to a live log in hpc_outputs/ we can tail from the
+# login node while the job is still running. PBS's final .OU is still
+# written at job end as normal.
+LIVE_LOG="/rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/live_${PBS_JOBID%%.*}.log"
+exec > >(tee "$LIVE_LOG") 2>&1
+
 module purge
 
 # 2) Load the same modules used to create the venv

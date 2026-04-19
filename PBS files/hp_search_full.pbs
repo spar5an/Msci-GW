@@ -1,0 +1,97 @@
+#!/bin/bash
+#PBS -N hp_full
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=L40S
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# Full hyperparameter sweep on GPU using the 200k O4 dataset.
+# SEARCH_SPACE is defined inside hp_search.py — edit it there to change the grid.
+# To resume a partially completed sweep, submit with:
+#     qsub -v SKIP=10 hp_search_full.pbs
+
+# Redirect stdout/stderr to a live log in hpc_outputs/ we can tail from the
+# login node while the job is still running. PBS's final .OU is still
+# written at job end as normal.
+LIVE_LOG="/rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/live_${PBS_JOBID%%.*}.log"
+exec > >(tee "$LIVE_LOG") 2>&1
+
+module purge
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+REPO_ROOT="/rds/general/user/jc5322/home/Project/Msci-GW"
+PIPELINE_DIR="$REPO_ROOT/HPC/Pipeline"
+CKPT_DIR="$PIPELINE_DIR/checkpoints/hp_full"
+RESULTS_CSV="$PIPELINE_DIR/hp_search_full_results.csv"
+
+mkdir -p "$CKPT_DIR"
+cd "$PIPELINE_DIR"
+
+echo "=== DEBUG INFO ==="
+echo "hostname:     $(hostname)"
+echo "pwd:          $(pwd)"
+echo "which python: $(which python)"
+python -V
+python -c "import torch; print('torch', torch.__version__, '| cuda:', torch.cuda.is_available(), '| dev:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
+
+echo
+echo "=== nvidia-smi ==="
+nvidia-smi || echo "nvidia-smi not available"
+
+echo
+echo "=== Pre-flight: import trainer + verify dataset ==="
+python - <<'PY'
+import os
+from train_model_gpu import run_training, GPU_DEFAULT_CONFIG
+path = os.path.join('Data', 'gr_200k_o4.pt')
+if not os.path.isfile(path):
+    raise SystemExit(f"Dataset missing: {path}")
+size_gb = os.path.getsize(path) / 1e9
+print(f"Dataset OK: {path}  ({size_gb:.2f} GB)")
+PY
+if [ $? -ne 0 ]; then
+    echo "ERROR: pre-flight failed"
+    exit 1
+fi
+
+echo
+echo "=== Planned grid (dry-run) ==="
+python hp_search.py --device gpu --dry-run --tag hp
+
+echo
+echo "=== Full sweep on GPU (skip=${SKIP:-0}) ==="
+python hp_search.py \
+    --device gpu \
+    --tag hp \
+    --skip "${SKIP:-0}" \
+    --results-csv "$RESULTS_CSV"
+EXIT_CODE=$?
+
+echo
+echo "=== Summary CSV: $RESULTS_CSV ==="
+if [ -f "$RESULTS_CSV" ]; then
+    head -1 "$RESULTS_CSV"
+    echo "-- rows:"
+    tail -n +2 "$RESULTS_CSV" | wc -l
+    echo "-- top runs by best_log_prob:"
+    python - <<'PY'
+import csv, os
+path = os.environ.get('RESULTS_CSV', 'hp_search_full_results.csv')
+with open(path) as f:
+    rows = list(csv.DictReader(f))
+scored = [r for r in rows if r.get('status') == 'ok' and r.get('best_log_prob')]
+scored.sort(key=lambda r: float(r['best_log_prob']), reverse=True)
+for r in scored[:10]:
+    print(f"  {r['run_id']:>8}  lp={r['best_log_prob']:>10}  ep={r['best_epoch']:>3}  "
+          f"emb={r.get('embedding_type','')}  ctx={r.get('context_dim','')}  "
+          f"h={r.get('hidden_dim','')}  L={r.get('num_flow_layers','')}")
+PY
+else
+    echo "(no CSV written)"
+fi
+
+echo
+echo "=== Done (exit $EXIT_CODE) ==="
+exit $EXIT_CODE

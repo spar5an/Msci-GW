@@ -1,0 +1,3 @@
+run_id,status,embedding_type,context_dim,hidden_dim,num_flow_layers,learning_rate,batch_size,best_log_prob,best_epoch,epochs_completed,num_params,elapsed_sec,checkpoint_path,error
+smoke000,ok,simple,64,64,4,0.0001,32,4.121829051589966,15,20,320632,956.4,./dingo_N160k_F4_C64_H64_E20_simple_crop500_whitened_smoke000_gpu.pt,
+smoke001,ok,simple,64,64,6,0.0001,32,8.847242474365235,19,20,378796,1311.1,./dingo_N160k_F6_C64_H64_E20_simple_crop500_whitened_smoke001_gpu.pt,

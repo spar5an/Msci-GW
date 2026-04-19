@@ -52,7 +52,7 @@ SEARCH_SPACE: dict[str, list] = {
 
 # Settings shared by every run (overrides DEFAULT_CONFIG once per sweep).
 COMMON_CONFIG: dict = {
-    'dataset_path':           'Data/dataset.pt',
+    'dataset_path':           'Data/gr_200k_o4.pt',
     'merger_crop_half_width': 500,
     'num_epochs':             20,
     'seed':                   0,

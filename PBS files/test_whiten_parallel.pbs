@@ -1,0 +1,90 @@
+#!/bin/bash
+#PBS -N test_whiten
+#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=8:mem=32gb
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# Smoke test for the parallelised _whiten_batch in gw_datagen.py.
+# Verifies:
+#   1. Import still works after the edit.
+#   2. Parallel output == serial output to float32 precision.
+#   3. Parallel path is actually faster than serial for a realistic batch.
+
+# Redirect stdout/stderr to a live log in hpc_outputs/ we can tail from the
+# login node while the job is still running. PBS's final .OU is still
+# written at job end as normal.
+LIVE_LOG="/rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/live_${PBS_JOBID%%.*}.log"
+exec > >(tee "$LIVE_LOG") 2>&1
+
+module purge
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+
+cd "/rds/general/user/jc5322/home/Project/Msci-GW/HPC/Pipeline/Data Generation"
+
+echo "=== DEBUG INFO ==="
+echo "hostname:     $(hostname)"
+python -V
+python -c "import torch, numpy; print('torch', torch.__version__); print('numpy', numpy.__version__)"
+
+echo
+echo "=== Parity + speed check ==="
+python <<'PY'
+import os, time
+import numpy as np
+import torch
+from gw_datagen import _whiten_batch
+
+# Representative sizes: small for parity, realistic-ish for speed.
+np.random.seed(0)
+X_small = torch.from_numpy(np.random.randn(256, 2, 8192).astype(np.float32) * 1e-21)
+X_big   = torch.from_numpy(np.random.randn(2000, 2, 8192).astype(np.float32) * 1e-21)
+
+print(f'Parity test: N=256, D=2 (4 workers vs serial)')
+t0 = time.time()
+out_ser = _whiten_batch(X_small, delta_t=1/4096, num_workers=1)
+t_ser = time.time() - t0
+t0 = time.time()
+out_par = _whiten_batch(X_small, delta_t=1/4096, num_workers=4)
+t_par = time.time() - t0
+max_abs = (out_ser - out_par).abs().max().item()
+print(f'  serial   : {t_ser:6.2f}s   shape={tuple(out_ser.shape)}  dtype={out_ser.dtype}')
+print(f'  parallel : {t_par:6.2f}s   shape={tuple(out_par.shape)}')
+print(f'  max|diff|: {max_abs:.3e}')
+assert max_abs < 1e-10, f'Parity failed: max diff {max_abs}'
+print('  PARITY OK')
+
+print()
+print(f'Speed test: N=2000, D=2 (serial vs 8 workers)')
+t0 = time.time()
+out_ser = _whiten_batch(X_big, delta_t=1/4096, num_workers=1)
+t_ser = time.time() - t0
+t0 = time.time()
+out_par = _whiten_batch(X_big, delta_t=1/4096, num_workers=8)
+t_par = time.time() - t0
+print(f'  serial   : {t_ser:6.2f}s')
+print(f'  8 workers: {t_par:6.2f}s   speedup x{t_ser / max(t_par, 1e-6):.1f}')
+print(f'  max|diff|: {(out_ser - out_par).abs().max().item():.3e}')
+
+# Extrapolate to 200k (what the real pipeline whitens per chunk)
+per_call_ser = t_ser / (2000 * 2)
+per_call_par = t_par / (2000 * 2)
+print()
+print(f'Extrapolated whitening cost for 200k x 2 detectors (= 400k calls):')
+print(f'  serial   : {per_call_ser * 400000 / 60:.1f} min')
+print(f'  8 workers: {per_call_par * 400000 / 60:.1f} min')
+print(f'  (runtime job will use 32 workers -> expect ~4x faster than this 8-worker number)')
+PY
+EXIT_CODE=$?
+
+echo
+echo "=== Done (exit $EXIT_CODE) ==="
+exit $EXIT_CODE

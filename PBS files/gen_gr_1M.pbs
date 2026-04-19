@@ -1,0 +1,229 @@
+#!/bin/bash
+#PBS -N gen_gr_1M
+#PBS -q v1_medium24
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=32:mem=450gb
+#PBS -j oe
+#PBS -o /rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/
+
+# Generate 1,000,000 GR waveforms using the cached O4 PSDs.
+#
+# Runs on the v1_medium24 queue (max 64 CPU / 450 GB / 24 h). The 200k run
+# peaked at ~103 GB RAM on 16 workers; one-shot 1M would hit ~500 GB even
+# here, so we still chunk 5 x 200k and copy each whitened chunk into a
+# pre-allocated output tensor. We request 32 cores with num_workers=32
+# (one process per core), roughly 2x faster generation than the 16-worker
+# 200k run. Peak stays around 220 GB (65 GB accumulator + ~150 GB chunk).
+#
+# Only X_whitened (+ y, indices, metadata) is written to disk — the raw
+# signal+noise tensor is never persisted (see gw_datagen.save_dataloaders).
+#
+# Resume a partially completed run with:
+#     qsub -v START_CHUNK=2 gen_gr_1M.pbs
+# (Each chunk writes its own temp .pt; already-finished chunks are reused.)
+
+# Redirect stdout/stderr to a live log in hpc_outputs/ we can tail from the
+# login node while the job is still running. PBS's final .OU is still
+# written at job end as normal.
+LIVE_LOG="/rds/general/user/jc5322/home/Project/Msci-GW/hpc_outputs/live_${PBS_JOBID%%.*}.log"
+exec > >(tee "$LIVE_LOG") 2>&1
+
+module purge
+module load tools/prod
+module load Python/3.11.3-GCCcore-12.3.0
+source /rds/general/user/jc5322/home/venv/gwtorchenv/bin/activate
+
+# Pin BLAS / numpy / scipy to 1 thread per process so multiprocessing
+# workers don't oversubscribe cores. Without this, 32 workers x N BLAS
+# threads each thrash the 32 cores and throughput drops below the 16-core
+# baseline. Also applies to whitening workers spawned by _whiten_batch.
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+
+# Let _whiten_batch (in gw_datagen.py) fan out across all allocated cores.
+export WHITEN_WORKERS=32
+
+REPO_ROOT="/rds/general/user/jc5322/home/Project/Msci-GW"
+DATAGEN_DIR="$REPO_ROOT/HPC/Pipeline/Data Generation"
+OUTPUT_DIR="$REPO_ROOT/HPC/Pipeline/Data"
+OUTPUT_PATH="$OUTPUT_DIR/gr_1M_o4.pt"
+CHUNK_DIR="$OUTPUT_DIR/gr_1M_chunks"
+
+mkdir -p "$OUTPUT_DIR" "$CHUNK_DIR"
+cd "$DATAGEN_DIR"
+
+echo "=== DEBUG INFO ==="
+echo "hostname:     $(hostname)"
+echo "pwd:          $(pwd)"
+echo "which python: $(which python)"
+python -V
+python -c "import pycbc, torch, gwpy, gwosc; \
+print('pycbc', pycbc.__version__); \
+print('torch', torch.__version__); \
+print('gwpy ', gwpy.__version__); \
+print('gwosc', gwosc.__version__)"
+
+echo
+echo "=== Pre-flight: import gw_datagen ==="
+python -c "from gw_datagen import pycbc_data_generator, save_dataloaders, _whiten_batch; print('gw_datagen imports OK')" || {
+    echo "ERROR: gw_datagen failed to import."
+    exit 1
+}
+
+echo
+echo "=== Verify PSD cache ==="
+python -c "
+import os, sys, numpy as np
+cache = os.path.join(os.getcwd(), 'o4_psd_cache')
+missing = []
+for det in ('H1', 'L1'):
+    p = os.path.join(cache, f'o4_psds_{det}_4096Hz.npz')
+    if not os.path.isfile(p):
+        missing.append(p)
+    else:
+        n = np.load(p)['psds'].shape[0]
+        print(f'  {det}: {n} PSDs at {p}')
+if missing:
+    print('ERROR: missing PSD cache files:', missing)
+    sys.exit(1)
+" || {
+    echo "ERROR: PSD cache missing. Run download_psds.pbs first."
+    exit 1
+}
+
+echo
+echo "=== Generate 1,000,000 GR waveforms in 5x200k chunks → $OUTPUT_PATH ==="
+echo "    START_CHUNK=${START_CHUNK:-0}"
+
+OUTPUT_PATH="$OUTPUT_PATH" CHUNK_DIR="$CHUNK_DIR" START_CHUNK="${START_CHUNK:-0}" python <<'PY'
+import os
+import numpy as np
+import torch
+
+from gw_datagen import pycbc_data_generator, _whiten_batch
+
+OUTPUT_PATH = os.environ['OUTPUT_PATH']
+CHUNK_DIR   = os.environ['CHUNK_DIR']
+START_CHUNK = int(os.environ['START_CHUNK'])
+
+NUM_CHUNKS      = 5
+PER_CHUNK       = 200_000
+TOTAL           = NUM_CHUNKS * PER_CHUNK
+TIME_RESOLUTION = 1 / 4096
+
+CONFIG = {
+    'mass1':        lambda size: np.random.uniform(5, 90, size=size),
+    'mass2':        lambda size: np.random.uniform(5, 90, size=size),
+    'spin1z':       lambda size: np.random.uniform(-0.8, 0.8, size=size),
+    'spin2z':       lambda size: np.random.uniform(-0.8, 0.8, size=size),
+    'distance':     lambda size: np.random.uniform(100, 5000, size=size),
+    'inclination':  lambda size: np.arccos(np.random.uniform(-1, 1, size=size)),
+    'coa_phase':    lambda size: np.random.uniform(0, 2 * np.pi, size=size),
+    'ra':           lambda size: np.random.uniform(0, 2 * np.pi, size=size),
+    'dec':          lambda size: np.arcsin(np.random.uniform(-1, 1, size=size)),
+    'polarization': lambda size: np.random.uniform(0, np.pi, size=size),
+    'm_g':          lambda size: np.zeros(size),
+    'alpha_lv':     lambda size: np.zeros(size),
+    'A':            lambda size: np.zeros(size),
+}
+
+metadata = None
+for i in range(START_CHUNK, NUM_CHUNKS):
+    chunk_path = os.path.join(CHUNK_DIR, f'chunk_{i:02d}.pt')
+    if os.path.isfile(chunk_path):
+        print(f'[chunk {i}] reusing existing {chunk_path}', flush=True)
+        continue
+
+    print(f'[chunk {i}] generating {PER_CHUNK} waveforms …', flush=True)
+    result = pycbc_data_generator(
+        config=CONFIG,
+        num_samples=PER_CHUNK,
+        time_resolution=TIME_RESOLUTION,
+        approximant='IMRPhenomD',
+        f_lower=10.0,
+        f_final=2048.0,
+        signal_length=2.0,
+        batch_size=512,
+        train_split=0.8,
+        val_split=0.1,
+        add_noise=True,
+        noise_backend='o4_psd',
+        num_workers=32,
+    )
+
+    base = result['train_loader'].dataset.dataset
+    X_raw = base.tensors[0]
+    y     = base.tensors[1]
+    metadata = result['metadata']
+
+    print(f'[chunk {i}] whitening {X_raw.shape} …', flush=True)
+    X_whitened = _whiten_batch(X_raw, TIME_RESOLUTION)
+    del X_raw, result, base
+
+    torch.save({'X_whitened': X_whitened, 'y': y, 'metadata': metadata},
+               chunk_path)
+    print(f'[chunk {i}] saved → {chunk_path}  '
+          f'(X={tuple(X_whitened.shape)}, y={tuple(y.shape)})', flush=True)
+    del X_whitened, y
+
+print('\n=== Stitching chunks into final dataset ===', flush=True)
+first = torch.load(os.path.join(CHUNK_DIR, 'chunk_00.pt'), weights_only=False)
+sample_shape = first['X_whitened'].shape[1:]
+y_dim        = first['y'].shape[1]
+metadata     = first['metadata']
+dtype        = first['X_whitened'].dtype
+del first
+
+X_all = torch.empty((TOTAL, *sample_shape), dtype=dtype)
+y_all = torch.empty((TOTAL, y_dim), dtype=torch.float32)
+
+for i in range(NUM_CHUNKS):
+    chunk_path = os.path.join(CHUNK_DIR, f'chunk_{i:02d}.pt')
+    data = torch.load(chunk_path, weights_only=False)
+    s = i * PER_CHUNK
+    e = s + PER_CHUNK
+    X_all[s:e] = data['X_whitened']
+    y_all[s:e] = data['y'].to(torch.float32)
+    print(f'[stitch {i}] loaded {chunk_path}', flush=True)
+    del data
+
+# Fresh deterministic train/val/test split across all 1M
+rng = np.random.default_rng(seed=0)
+perm = rng.permutation(TOTAL)
+n_train = int(0.8 * TOTAL)
+n_val   = int(0.1 * TOTAL)
+train_indices = torch.from_numpy(perm[:n_train]).long()
+val_indices   = torch.from_numpy(perm[n_train:n_train + n_val]).long()
+test_indices  = torch.from_numpy(perm[n_train + n_val:]).long()
+
+metadata = dict(metadata)
+metadata['train_size'] = int(train_indices.numel())
+metadata['val_size']   = int(val_indices.numel())
+metadata['test_size']  = int(test_indices.numel())
+metadata['num_samples'] = TOTAL
+
+save_data = {
+    'train_indices': train_indices,
+    'val_indices':   val_indices,
+    'test_indices':  test_indices,
+    'X_whitened':    X_all,
+    'y':             y_all,
+    'metadata':      metadata,
+}
+
+os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+torch.save(save_data, OUTPUT_PATH)
+print(f'\nDataset saved to {OUTPUT_PATH}')
+print(f"  Waveform shape     : {metadata['waveform_shape']}")
+print(f"  Train / val / test : {metadata['train_size']} / {metadata['val_size']} / {metadata['test_size']}")
+print(f"  Parameters         : {metadata['parameter_names']}")
+PY
+EXIT_CODE=$?
+
+echo
+echo "=== Done (exit $EXIT_CODE) ==="
+echo "Chunk files left in $CHUNK_DIR — rm -rf once you've verified $OUTPUT_PATH."
+exit $EXIT_CODE
