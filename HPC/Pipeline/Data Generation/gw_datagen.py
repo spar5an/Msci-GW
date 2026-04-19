@@ -3046,3 +3046,262 @@ def normalize_dataloaders(result: Dict,
         'test_loader': test_loader,
         'metadata': new_metadata
     }
+
+
+################### Derived representations: Q-transform & SVD ###################
+
+# These utilities produce alternative input representations of the whitened
+# strain for ML training. They are mode-agnostic (work on GR, MG, LV datasets
+# identically) since they consume only ``X_whitened`` and ``y``.
+
+
+def detect_mode(y: np.ndarray, col: Dict[str, int]) -> str:
+    """Infer physics mode from the label columns.
+
+    Returns 'gr' if m_g and alpha_lv are identically zero across all rows,
+    'mg' if m_g varies but alpha_lv is zero, otherwise 'lv'.
+    """
+    alpha = y[:, col['alpha_lv']]
+    if np.any(alpha != 0):
+        return 'lv'
+    if np.any(y[:, col['m_g']] != 0):
+        return 'mg'
+    return 'gr'
+
+
+def compute_qtransform_batch(
+    X_whitened: np.ndarray,
+    delta_t: float = 1.0 / 4096,
+    frange: Tuple[float, float] = (20.0, 300.0),
+    logfsteps: int = 50,
+    qrange: Tuple[float, float] = (4.0, 16.0),
+    delta_t_out: float = 0.002,
+    progress: bool = False,
+) -> np.ndarray:
+    """Q-transform magnitude of every (sample, detector) pair.
+
+    Parameters
+    ----------
+    X_whitened : (N, D, T) array of whitened strain
+    delta_t    : time resolution of the input, seconds
+    frange     : frequency range for the q-transform (Hz)
+    logfsteps  : number of log-spaced frequency bins
+    qrange     : (q_min, q_max) tile search range for the q-transform
+    delta_t_out: time resolution of the output grid, seconds
+
+    Returns
+    -------
+    Q : (N, D, F, T_q) float32 array of |q-coefficients|
+    """
+    X_whitened = np.asarray(X_whitened)
+    N, D, _ = X_whitened.shape
+    probe = TimeSeries(X_whitened[0, 0].astype(np.float64), delta_t=delta_t)
+    _, _, qplane = probe.qtransform(
+        delta_t=delta_t_out, logfsteps=logfsteps,
+        qrange=qrange, frange=frange,
+    )
+    F_bins, T_q = qplane.shape
+    out = np.empty((N, D, F_bins, T_q), dtype=np.float32)
+    iterator = range(N)
+    if progress:
+        iterator = tqdm(iterator, desc='q-transform')
+    for n in iterator:
+        for d in range(D):
+            ts = TimeSeries(X_whitened[n, d].astype(np.float64), delta_t=delta_t)
+            _, _, q = ts.qtransform(
+                delta_t=delta_t_out, logfsteps=logfsteps,
+                qrange=qrange, frange=frange,
+            )
+            out[n, d] = np.abs(q).astype(np.float32)
+    return out
+
+
+def build_svd_basis(
+    templates: np.ndarray,
+    k_max: int = 600,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """SVD of a (M, T) clean-template matrix.
+
+    Returns
+    -------
+    Vh : (K, T) float32, K = min(k_max, rank) — right singular vectors
+    s  : (K,) float32 — singular values in descending order
+
+    ``Vh`` is the projection matrix: coeffs = Vh @ strain, strain ≈ coeffs @ Vh.
+    """
+    templates = np.asarray(templates, dtype=np.float32)
+    if templates.ndim != 2:
+        raise ValueError(f"expected 2D (M, T) template matrix, got {templates.shape}")
+    _, s, Vh = np.linalg.svd(templates, full_matrices=False)
+    k = min(k_max, Vh.shape[0])
+    return Vh[:k].astype(np.float32), s[:k].astype(np.float32)
+
+
+def apply_svd_projection(
+    X_whitened: np.ndarray,
+    basis: np.ndarray,
+) -> np.ndarray:
+    """Project (N, D, T) strain onto a (K, T) basis → (N, D, K) coefficients.
+
+    Inverse: ``strain_reconstruction = coeffs @ basis``.
+    """
+    X_whitened = np.asarray(X_whitened, dtype=np.float32)
+    basis = np.asarray(basis, dtype=np.float32)
+    if X_whitened.shape[-1] != basis.shape[-1]:
+        raise ValueError(
+            f"length mismatch: X has T={X_whitened.shape[-1]}, "
+            f"basis has T={basis.shape[-1]}")
+    return np.einsum('kt,ndt->ndk', basis, X_whitened)
+
+
+def save_svd_basis(
+    path: str,
+    basis: np.ndarray,
+    singular_values: np.ndarray,
+    detector: str,
+    mode: str,
+    n_templates: int,
+) -> None:
+    """Save an SVD basis to a .npz file."""
+    np.savez(
+        path,
+        basis_vectors=basis.astype(np.float32),
+        singular_values=singular_values.astype(np.float32),
+        detector=detector,
+        mode=mode,
+        n_templates=n_templates,
+    )
+
+
+def load_svd_basis(path: str) -> Dict:
+    """Load an SVD basis written by ``save_svd_basis``."""
+    data = np.load(path, allow_pickle=False)
+    return {
+        'basis': data['basis_vectors'],
+        'singular_values': data['singular_values'],
+        'detector': str(data['detector']),
+        'mode': str(data['mode']),
+        'n_templates': int(data['n_templates']),
+    }
+
+
+def _average_o4_psd(detector: str, delta_f: float, flen: int,
+                    cache_dir: str = _DEFAULT_CACHE) -> FrequencySeries:
+    """Segment-averaged O4 PSD on the requested (delta_f, flen) grid."""
+    data = np.load(os.path.join(cache_dir, f'o4_psds_{detector}_4096Hz.npz'))
+    freqs_cache = data['freqs']
+    psd_mean = data['psds'].mean(axis=0)
+    safe = freqs_cache > 0
+    interp = interp1d(
+        np.log10(freqs_cache[safe]),
+        np.log10(psd_mean[safe]),
+        bounds_error=False,
+        fill_value=(np.log10(psd_mean[safe][0]),
+                    np.log10(psd_mean[safe][-1])),
+    )
+    f_out = np.arange(flen) * delta_f
+    psd_out = np.empty(flen)
+    psd_out[0] = 1.0
+    psd_out[1:] = 10 ** interp(np.log10(f_out[1:]))
+    return FrequencySeries(psd_out, delta_f=delta_f)
+
+
+def _clean_whitened_template(
+    params: Dict,
+    mode: str,
+    detector: str,
+    psd: FrequencySeries,
+    time_resolution: float = 1.0 / 4096,
+    target_length: int = 8192,
+    approximant: str = 'IMRPhenomD',
+    f_lower: float = 10.0,
+    f_final: float = 2048.0,
+    f_lower_whiten: float = 20.0,
+) -> np.ndarray:
+    """Dispatch to the correct per-mode worker with ``add_noise=False`` and whiten."""
+    if mode == 'gr':
+        r = _generate_single_waveform(
+            params=params, time_resolution=time_resolution,
+            approximant=approximant, f_lower=f_lower,
+            detectors=[detector], target_length=target_length,
+            add_noise=False, f_final=f_final,
+        )
+    elif mode == 'mg':
+        r = _generate_single_modified_waveform(
+            params=params, time_resolution=time_resolution,
+            approximant=approximant, f_lower=f_lower,
+            detectors=[detector], target_length=target_length,
+            add_noise=False, m_g=params['m_g'], f_final=f_final,
+        )
+    elif mode == 'lv':
+        r = _generate_single_lv_waveform(
+            params=params, time_resolution=time_resolution,
+            approximant=approximant, f_lower=f_lower,
+            detectors=[detector], target_length=target_length,
+            add_noise=False, m_g=params['m_g'],
+            alpha_lv=params['alpha_lv'], A=params['A'],
+            f_final=f_final,
+        )
+    else:
+        raise ValueError(f"unknown mode {mode!r}")
+    if not r['success']:
+        raise RuntimeError(r.get('error', 'template generation failed'))
+    w, _, _ = whiten_waveform(
+        r['detectors'][detector].numpy(),
+        delta_t=time_resolution, f_lower=f_lower_whiten, psd=psd,
+    )
+    return w.astype(np.float32)
+
+
+def generate_clean_templates(
+    y: np.ndarray,
+    col: Dict[str, int],
+    mode: str,
+    detector: str,
+    n_templates: int,
+    psd_cache_dir: str = _DEFAULT_CACHE,
+    rng: np.random.Generator = None,
+    progress: bool = False,
+    time_resolution: float = 1.0 / 4096,
+    target_length: int = 8192,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate clean whitened templates for building an SVD basis.
+
+    Draws ``n_templates`` random rows of the dataset labels ``y``, runs each
+    through the mode-specific per-sample worker with noise disabled, whitens
+    the result against the segment-averaged O4 PSD for ``detector``, and
+    returns a dense (M, T) matrix suitable for ``build_svd_basis``.
+
+    Returns
+    -------
+    templates : (M, T) float32, M = number of successful generations ≤ n_templates
+    indices   : (M,) int — source row indices in ``y``
+    """
+    if rng is None:
+        rng = np.random.default_rng(0)
+    n = min(n_templates, len(y))
+    idxs = rng.choice(len(y), size=n, replace=False)
+
+    delta_f = 1.0 / (target_length * time_resolution)
+    flen = target_length // 2 + 1
+    psd = _average_o4_psd(detector, delta_f, flen, cache_dir=psd_cache_dir)
+
+    keys = ('mass1', 'mass2', 'spin1z', 'spin2z', 'distance',
+            'inclination', 'coa_phase', 'ra', 'dec', 'polarization',
+            'm_g', 'alpha_lv', 'A')
+    out = np.zeros((n, target_length), dtype=np.float32)
+    kept = np.zeros(n, dtype=bool)
+    iterator = enumerate(idxs)
+    if progress:
+        iterator = tqdm(list(iterator), desc=f'{detector} templates')
+    for row, src in iterator:
+        params = {k: float(y[src, col[k]]) for k in keys}
+        try:
+            out[row] = _clean_whitened_template(
+                params=params, mode=mode, detector=detector, psd=psd,
+                time_resolution=time_resolution, target_length=target_length,
+            )
+            kept[row] = True
+        except Exception:
+            pass
+    return out[kept], idxs[kept]
