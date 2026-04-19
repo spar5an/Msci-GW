@@ -7,8 +7,9 @@ import numpy as np
 import torch
 
 
-DATASET_PATH = 'Data/dataset.pt'
-PLOT_DIR = Path('plots')
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+DATASET_PATH = str(PIPELINE_ROOT / 'Data' / 'dataset.pt')
+PLOT_DIR = PIPELINE_ROOT / 'plots'
 PLOT_DIR.mkdir(exist_ok=True)
 NUM_EVENTS = 4
 SEED = 0

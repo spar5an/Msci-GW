@@ -33,15 +33,27 @@ import numpy as np
 import torch
 from scipy import stats
 
-from train_model_cpu import (
+# This script lives at <Pipeline>/evaluation/; see evaluate_model.py for why
+# we pull the model/dataset helpers from ML/cpu/ regardless of training device.
+PIPELINE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PIPELINE_ROOT / 'ML' / 'cpu'))
+from train_model import (  # noqa: E402
     DINGOModel,
     crop_to_merger,
     load_dataset_pt,
     resolve_crop_for_embedding,
 )
 
+# Sky-time conversion: model learns RA in a training frame fixed at
+# T_REF_DEFAULT (GW150914). For a real event at a different GPS time the
+# celestial RA is rotated forward by the sidereal angle swept between t_ref
+# and t_event. We apply this to the posterior samples so the output sits in
+# the true celestial frame and can be compared to the catalogue.
+sys.path.insert(0, str(PIPELINE_ROOT / 'Real Data'))
+from sky_time_conversion import ra_from_reference_time, T_REF_DEFAULT  # noqa: E402
 
-DEVICE = torch.device('cpu')
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 # ---------------------------------------------------------------------------
@@ -51,14 +63,15 @@ DEVICE = torch.device('cpu')
 CHECKPOINT   = 'dingo_N8k_F4_C128_H64_E20_conv1d_whitened_cpu.pt'
 if len(sys.argv) > 1:
     CHECKPOINT = sys.argv[1]
-SYN_DATASET  = 'Data/dataset.pt'
-REAL_DATA_PT = 'Real Data/pt/o4_all_events_2s_real.pt'
-CSV_PATH     = 'gw_events_stats.csv'
+SYN_DATASET  = str(PIPELINE_ROOT / 'Data' / 'dataset.pt')
+REAL_DATA_PT = str(PIPELINE_ROOT / 'Real Data' / 'pt' / 'o4_all_events_2s_real.pt')
+CSV_PATH     = str(PIPELINE_ROOT / 'gw_events_stats.csv')
 _embedding_stem = next(
-    (tag for tag in ('simple', 'conv1d', 'lstm') if tag in Path(CHECKPOINT).stem),
+    (tag for tag in ('qtransform_conv2d', 'svd_mlp',
+                     'simple', 'conv1d', 'lstm') if tag in Path(CHECKPOINT).stem),
     'misc',
 )
-PLOT_DIR     = Path('plots') / _embedding_stem
+PLOT_DIR     = PIPELINE_ROOT / 'plots' / _embedding_stem
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 NUM_SAMPLES  = 5000
 CORNER_EVENTS = ['GW150914', 'GW230628_231200', 'GW230820_212515', 'GW250114_082203']
@@ -70,9 +83,13 @@ CORNER_EVENTS = ['GW150914', 'GW230628_231200', 'GW230820_212515', 'GW250114_082
 
 def build_model_from_checkpoint(ckpt):
     cfg = ckpt['config']
+    data_shape = cfg.get('data_shape')
+    if data_shape is None:
+        data_shape = (cfg['seq_len'],)
+    data_shape = tuple(data_shape)
     model = DINGOModel(
         num_detectors=cfg['num_detectors'],
-        seq_len=cfg['seq_len'],
+        data_shape=data_shape,
         param_dim=cfg['param_dim'],
         context_dim=cfg['context_dim'],
         num_flow_layers=cfg['num_flow_layers'],
@@ -304,17 +321,26 @@ def main():
     print(f"  best log-prob @ ep{ckpt.get('best_epoch')}: {ckpt.get('best_log_prob'):.4f}")
 
     # --- synthetic dataset (for param_norm_info) ---
-    crop_hw = resolve_crop_for_embedding(ckpt['config'])
+    cfg = ckpt['config']
+    crop_hw = resolve_crop_for_embedding(cfg)
     if crop_hw is not None:
         print(f"Applying merger crop ±{crop_hw} samples (from checkpoint config)")
-    param_param = ckpt['config'].get('param_parameterization', 'm1_m2')
+    param_param = cfg.get('param_parameterization', 'm1_m2')
     if param_param != 'm1_m2':
         print(f"Parameterization: {param_param}")
+    input_repr = cfg.get('input_representation', 'strain')
+    if input_repr != 'strain':
+        print(f"Representation:   {input_repr}")
     syn = load_dataset_pt(
         SYN_DATASET,
-        use_whitened=ckpt['config'].get('whiten', True),
+        use_whitened=cfg.get('whiten', True),
         merger_crop_half_width=crop_hw,
         param_parameterization=param_param,
+        input_representation=input_repr,
+        svd_k=cfg.get('svd_k'),
+        svd_basis_path=cfg.get('svd_basis_path'),
+        qtransform_logfsteps=cfg.get('qtransform_logfsteps', 50),
+        qtransform_delta_t_out=cfg.get('qtransform_delta_t_out', 0.002),
     )
     param_names = syn['param_names']
     param_norm_info = syn['param_norm_info']
@@ -325,6 +351,7 @@ def main():
     X_real_w = real['X_whitened'].float()  # (N_real, 2, 8192)
     X_real_w = crop_to_merger(X_real_w, crop_hw)
     event_names = list(real['metadata']['events'])
+    gps_mergers = real['metadata'].get('gps_mergers', {})
     N_real = X_real_w.shape[0]
     print(f"  {N_real} events, data shape {tuple(X_real_w.shape)}")
 
@@ -352,6 +379,22 @@ def main():
     raw_samples = run_inference(model, X_real_w, NUM_SAMPLES)
     samples_phys = [denormalize(s, param_names, param_norm_info) for s in raw_samples]
 
+    # Rotate RA from training frame (t_ref) to each event's celestial frame.
+    # Missing GPS times fall back to t_ref (no rotation).
+    if 'ra' in param_names:
+        ra_idx = param_names.index('ra')
+        n_rotated = 0
+        for i, ev in enumerate(event_names):
+            t_event = gps_mergers.get(ev)
+            if t_event is None:
+                continue
+            samples_phys[i][:, ra_idx] = ra_from_reference_time(
+                samples_phys[i][:, ra_idx], float(t_event), T_REF_DEFAULT
+            )
+            n_rotated += 1
+        print(f"  rotated RA to event frame for {n_rotated}/{N_real} events "
+              f"(t_ref={T_REF_DEFAULT})")
+
     # --- per-event log-prob (catalogue truth where available, posterior mean otherwise) ---
     # For events with catalogue truth we fill {mass1, mass2, distance, ra, dec}
     # from the CSV and the remaining 5 astrophysical params from the posterior mean.
@@ -359,16 +402,33 @@ def main():
     # (partial truth) — matching GWTC on the 5 constrained params is the useful bit.
     logprobs_real = np.zeros(N_real)
     matched = []
+    ra_idx_lp = param_names.index('ra') if 'ra' in param_names else None
     for i, ev in enumerate(event_names):
         cat_name = strip_version(ev)
         cat_row = catalogue.get(cat_name)
+        # Posterior mean (celestial frame) for parameters the catalogue doesn't
+        # provide. For the log-prob proxy we need training-frame RA, so rotate
+        # the mean RA backward before filling.
         pseudo = samples_phys[i].mean(axis=0).copy()
+        t_event = gps_mergers.get(ev)
+        if ra_idx_lp is not None and t_event is not None:
+            pseudo[ra_idx_lp] = ra_from_reference_time(
+                pseudo[ra_idx_lp], T_REF_DEFAULT, float(t_event)
+            )
         truth = {}
         if cat_row is not None:
             for csv_col, model_param in csv_to_model.items():
                 v = cat_row[csv_col]
                 j = param_names.index(model_param)
-                pseudo[j] = v
+                # Catalogue RA is celestial; model log-prob wants training frame.
+                if model_param == 'ra' and t_event is not None:
+                    pseudo[j] = float(ra_from_reference_time(
+                        np.asarray(v), T_REF_DEFAULT, float(t_event)
+                    ))
+                else:
+                    pseudo[j] = v
+                # truth dict stays in the same frame as samples_phys
+                # (celestial for RA, which matches the rotation done above).
                 truth[model_param] = v
             if param_param == 'Mc_q':
                 m1_cat = cat_row['mass_1_source']

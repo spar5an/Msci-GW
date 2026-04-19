@@ -22,7 +22,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-PIPELINE = HERE.parent
+# conftest.py already adds HPC/Pipeline/Data Generation to sys.path under
+# pytest. Replicate that here so the script still works when executed
+# directly (python test_features.py).
+PIPELINE = HERE.parent.parent / 'HPC' / 'Pipeline'
 sys.path.insert(0, str(PIPELINE / 'Data Generation'))
 
 from gw_datagen import (                           # noqa: E402
