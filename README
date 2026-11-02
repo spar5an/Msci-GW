@@ -1,1 +1,43 @@
-Pushing for deadline
+# Msci-GW
+ 
+Code and notes for an MSci project on gravitational waves and machine learning (Imperial College London).
+ 
+The project trains normalising flows on simulated detector strain to constrain gravitational-wave dispersion, comparing standard GR against two modified-gravity models: a massive graviton (MG) and a more general Lorentz-violating (LV) dispersion relation.
+ 
+## Layout
+ 
+```
+HPC/Pipeline/
+  Data Generation/   waveform simulation, PSD download, dataset assembly
+  Real Data/         download and reprocess real events (e.g. GW150914, O4)
+  train_model.py     normalising-flow training
+  plot_results.py    plotting
+  CODEBOOK.md         gw_datagen API reference
+HPC/Guide.md         cluster setup for Imperial CX3 (venv, pycbc, PBS)
+local tests/         pytest suite + diagnostic plots (see TESTS.md)
+depreciated/         old prototypes
+```
+ 
+## Data generation
+ 
+Waveforms are generated with PyCBC (`IMRPhenomD`) at 4096 Hz for the H1 and L1 detectors. GR, MG and LV share one frequency-domain to IRFFT path so the datasets only differ by the injected dispersion. Noise is added from real O4 PSDs (GWOSC), with an analytic aLIGO backend for debugging. Generation is chunked and can run in parallel, and outputs train/val/test PyTorch `DataLoader`s plus metadata. Full argument reference is in `HPC/Pipeline/CODEBOOK.md`.
+ 
+## Running on HPC
+ 
+See `HPC/Guide.md`. It covers loading the Python module on the cluster, creating a clean venv, installing pycbc, and submitting jobs with the PBS scripts.
+ 
+## Tests
+ 
+```bash
+cd "local tests/code tests"
+pytest
+```
+ 
+The real-PSD tests need a cached download first (run once from `Data Generation/`):
+ 
+```bash
+python download_o4_psds.py --detectors H1 L1 --n-segments 100
+```
+ 
+If the cache is missing, those tests are skipped automatically. See `local tests/TESTS.md` for details.
+ 
